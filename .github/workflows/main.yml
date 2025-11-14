@@ -50,7 +50,12 @@ jobs:
       uses: subosito/flutter-action@v2
       with:
         flutter-version: ${{ env.FLUTTER_VERSION }}
-
+    # --- NOWY KROK — usuwa stare buildy ---------------------------------------------------------
+    - name: Clean previous builds
+      run: |
+        flutter clean
+        rm -rf build
+  # --- koniec NOWY KROK — usuwa stare buildy ---------------------------------------------------------
     - name: Flet Build Web
       run: |
             echo "GITHUB_REPOSITORY: ${GITHUB_REPOSITORY}, USER: ${GITHUB_REPOSITORY%/*}, PROJECT_BASE_URL: ${GITHUB_REPOSITORY#*/}"
