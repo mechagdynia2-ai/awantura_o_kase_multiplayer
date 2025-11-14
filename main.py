@@ -5,6 +5,8 @@ from thefuzz import fuzz
 from js import fetch
 import warnings
 
+BACKEND_URL = "https://game-multiplayer-qfn1.onrender.com"
+
 warnings.filterwarnings("ignore")
 
 # -----------------------------------------------------------------------------
@@ -244,6 +246,7 @@ async def main(page: ft.Page):
         "Wróć do menu", icon=ft.Icons.ARROW_BACK,
         width=400, visible=False, style=ft.ButtonStyle(color="red")
     )
+
     # -----------------------------------------------------
     #  WIDOK – GŁÓWNY EKRAN GRY
     # -----------------------------------------------------
@@ -296,7 +299,9 @@ async def main(page: ft.Page):
             await start_game_session(e, filename)
 
         return ft.Container(
-            content=ft.Text(f"{i:02d}", size=14, weight=ft.FontWeight.BOLD, color="black"),
+            content=ft.Text(
+                f"{i:02d}", size=14, weight=ft.FontWeight.BOLD, color="black"
+            ),
             width=46,
             height=46,
             alignment=ft.alignment.center,
@@ -306,9 +311,20 @@ async def main(page: ft.Page):
             on_click=make_async_click(click)
         )
 
+    # kafelki zestawów
     menu_standard = [menu_tile(i, "blue_grey_50") for i in range(1, 31)]
     menu_pop = [menu_tile(i, "deep_purple_50") for i in range(31, 41)]
     menu_music = [menu_tile(i, "amber_50") for i in range(41, 51)]
+
+    # przycisk i widok rankingu
+    btn_rank = ft.FilledButton("Ranking", width=300)
+
+    rank_view = ft.Column(
+        [],
+        height=300,
+        scroll=ft.ScrollMode.AUTO,
+        visible=False
+    )
 
     main_menu = ft.Column(
         [
@@ -316,6 +332,11 @@ async def main(page: ft.Page):
             ft.Text("Pliki pobierane są bezpośrednio z GitHuba", size=14),
             main_feedback,
             ft.Divider(height=15),
+
+            btn_rank,
+            rank_view,
+
+            ft.Divider(height=20),
 
             ft.Row(menu_standard[:10], alignment="center", wrap=True),
             ft.Row(menu_standard[10:20], alignment="center", wrap=True),
@@ -390,6 +411,17 @@ async def main(page: ft.Page):
 
         page.dialog = dlg
         dlg.open = True
+
+        # --- ZAPIS WYNIKU DO BACKENDU ---
+        async def _task():
+            await send_score(
+                player="Gracz",  # TODO: dodać input na imię
+                score=game["money"],
+                time_ms=0        # TODO: dodać licznik czasu
+            )
+
+        page.run_task(_task)
+
         page.update()
 
     # =====================================================
@@ -437,6 +469,7 @@ async def main(page: ft.Page):
         btn_back.visible = True
 
         page.update()
+
     # =====================================================
     #  SUBMIT ODPOWIEDZI
     # =====================================================
@@ -488,6 +521,7 @@ async def main(page: ft.Page):
         txt_feedback.value = f"Usunięto 2 błędne odpowiedzi! (koszt {cost} zł)"
         txt_feedback.color = "blue"
         page.update()
+
     # =====================================================
     #  KUPNO ABCD
     # =====================================================
@@ -571,6 +605,7 @@ async def main(page: ft.Page):
         txt_feedback.color = "black"
 
         page.update()
+
     # =====================================================
     #  LICYTACJA
     # =====================================================
@@ -618,6 +653,7 @@ async def main(page: ft.Page):
             btn_bid.disabled = True
 
         page.update()
+
     # =====================================================
     #  ROZPOCZĘCIE LICYTACJI
     # =====================================================
@@ -662,6 +698,7 @@ async def main(page: ft.Page):
         btn_show_question.disabled = False
 
         page.update()
+
     # =====================================================
     #  RESET GRY DLA TEGO SAMEGO ZESTAWU
     # =====================================================
@@ -692,6 +729,55 @@ async def main(page: ft.Page):
         page.update()
 
     # =====================================================
+    #  WYSYŁANIE WYNIKU DO BACKENDU
+    # =====================================================
+    async def send_score(player: str, score: int, time_ms: int):
+        try:
+            payload = {
+                "player": player,
+                "score": score,
+                "time": time_ms
+            }
+
+            await fetch(
+                f"{BACKEND_URL}/submit",
+                {
+                    "method": "POST",
+                    "headers": {"Content-Type": "application/json"},
+                    "body": __import__("json").dumps(payload)
+                }
+            )
+
+            print("[RANKING] Wynik wysłany:", payload)
+
+        except Exception as e:
+            print("[RANKING ERROR]", e)
+
+    # =====================================================
+    #  ŁADOWANIE RANKINGU
+    # =====================================================
+    async def load_rank(e):
+        try:
+            response = await fetch(f"{BACKEND_URL}/leaderboard")
+            data = await response.json()
+
+            rank_view.controls.clear()
+
+            for i, entry in enumerate(data[:20], start=1):
+                rank_view.controls.append(
+                    ft.Text(
+                        f"{i}. {entry['player']} — {entry['score']} zł ({entry['date']})",
+                        size=16
+                    )
+                )
+
+            rank_view.visible = True
+            page.update()
+
+        except Exception as ex:
+            print("[RANK ERROR]", ex)
+
+    # =====================================================
     #  POWRÓT DO MENU
     # =====================================================
     def back_to_menu(e):
@@ -709,16 +795,6 @@ async def main(page: ft.Page):
     async def start_game_session(e, filename: str):
         print(f"[LOAD] Pobieram zestaw: {filename}")
         questions = await parse_question_file(page, filename)
-
-        # Wcześniej było:
-        # if not questions:
-        #     print(f"[WARNING] Plik {filename} zwrócił pustą listę – próbuję mimo to.")
-        #     main_feedback.visible = True
-        #     page.update(main_feedback)
-        #     return
-
-        # POPRAWKA: Przejdź do widoku gry ZAWSZE,
-        # a błąd braku pytań obsłuż w start_bidding/start_question.
 
         game["questions"] = questions
         game["total"] = len(questions)
@@ -742,7 +818,9 @@ async def main(page: ft.Page):
     btn_show_question.on_click = start_question
     btn_bid.on_click = bid_100
     btn_next.on_click = start_bidding
+    btn_rank.on_click = make_async_click(load_rank)
     btn_back.on_click = back_to_menu
+
     # =====================================================
     #  DODANIE WIDOKÓW NA STRONĘ
     # =====================================================
