@@ -772,59 +772,67 @@ async def main(page: ft.Page):
 
 
     async def mp_bid(kind: str):
-        if not mp_state["player_id"]:
-            txt_mp_status.value = "Najpierw dołącz do pokoju."
+    if not mp_state["player_id"]:
+        txt_mp_status.value = "Najpierw dołącz do pokoju."
+        txt_mp_status.color = "red"
+        page.update(txt_mp_status)
+        return
+
+    try:
+        payload = __import__("json").dumps(
+            {"player_id": mp_state["player_id"], "kind": kind}
+        )
+
+        resp = await fetch(
+            f"{BACKEND_URL}/bid",
+            js.Object.fromEntries([
+                ["method", "POST"],
+                ["headers", js.Object.fromEntries([
+                    ["Content-Type", "application/json"]
+                ])],
+                ["body", payload]
+            ])
+        )
+
+        status = getattr(resp, "status", None)
+
+        if status == 400:
+            raw_err = await resp.json()
+            try:
+                err = raw_err.to_py()
+            except:
+                err = raw_err
+
+            detail = (
+                err.get("detail", "Błąd licytacji.")
+                if isinstance(err, dict)
+                else "Błąd licytacji."
+            )
+            txt_mp_status.value = detail
             txt_mp_status.color = "red"
             page.update(txt_mp_status)
             return
+
+        raw_data = await resp.json()
         try:
-            resp = await fetch(
-                f"{BACKEND_URL}/bid",
-                {
-                    "method": "POST",
-                    "headers": {"Content-Type": "application/json"},
-                    "body": __import__("json").dumps(
-                        {"player_id": mp_state["player_id"], "kind": kind}
-                    ),
-                },
-            )
+            data = raw_data.to_py()
+        except:
+            data = raw_data
 
-            status = getattr(resp, "status", None)
+        pot_val = 0
+        if isinstance(data, dict):
+            pot_val = data.get("pot", 0)
 
-            if status == 400:
-                raw_err = await resp.json()
-                try:
-                    err = raw_err.to_py()
-                except AttributeError:
-                    err = raw_err
-                detail = (
-                    err.get("detail", "Błąd licytacji.")
-                    if isinstance(err, dict)
-                    else "Błąd licytacji."
-                )
-                txt_mp_status.value = detail
-                txt_mp_status.color = "red"
-                page.update(txt_mp_status)
-                return
+        txt_mp_status.value = f"Licytacja przyjęta. Pula: {pot_val} zł"
+        txt_mp_status.color = "blue"
+        page.update(txt_mp_status)
 
-            raw_data = await resp.json()
-            try:
-                data = raw_data.to_py()
-            except AttributeError:
-                data = raw_data
+    except Exception as ex:
+        print("MP BID ERROR", ex)
+        txt_mp_status.value = "Błąd połączenia z serwerem multiplayer."
+        txt_mp_status.color = "red"
+        page.update(txt_mp_status)
 
-            pot_val = 0
-            if isinstance(data, dict):
-                pot_val = data.get("pot", 0)
-
-            txt_mp_status.value = f"Licytacja przyjęta. Pula: {pot_val} zł"
-            txt_mp_status.color = "blue"
-            page.update(txt_mp_status)
-        except Exception as ex:
-            print("MP BID ERROR", ex)
-            txt_mp_status.value = "Błąd połączenia z serwerem multiplayer."
-            txt_mp_status.color = "red"
-            page.update(txt_mp_status)
 
     async def mp_bid_normal(e):
         await mp_bid("normal")
@@ -833,72 +841,94 @@ async def main(page: ft.Page):
         await mp_bid("allin")
 
     async def mp_send_chat(e):
-        msg = (txt_mp_chat.value or "").strip()
-        if not msg:
-            return
-        name = mp_state["player_name"] or "Anonim"
-        try:
-            await fetch(
-                f"{BACKEND_URL}/chat",
-                {
-                    "method": "POST",
-                    "headers": {"Content-Type": "application/json"},
-                    "body": __import__("json").dumps(
-                        {"player": name, "message": msg}
-                    ),
-                },
-            )
-            txt_mp_chat.value = ""
-            page.update(txt_mp_chat)
-        except Exception as ex:
-            print("MP CHAT ERROR", ex)
+    msg = (txt_mp_chat.value or "").strip()
+    if not msg:
+        return
+
+    name = mp_state["player_name"] or "Anonim"
+
+    try:
+        payload = __import__("json").dumps(
+            {"player": name, "message": msg}
+        )
+
+        await fetch(
+            f"{BACKEND_URL}/chat",
+            js.Object.fromEntries([
+                ["method", "POST"],
+                ["headers", js.Object.fromEntries([
+                    ["Content-Type", "application/json"]
+                ])],
+                ["body", payload]
+            ])
+        )
+
+        txt_mp_chat.value = ""
+        page.update(txt_mp_chat)
+
+    except Exception as ex:
+        print("MP CHAT ERROR", ex)
+
 
     async def mp_poll_state():
-        await asyncio.sleep(1)
-        while True:
+    await asyncio.sleep(1)
+    while True:
+        try:
+            resp = await fetch(
+                f"{BACKEND_URL}/state",
+                js.Object.fromEntries([
+                    ["method", "GET"]
+                ])
+            )
+
+            raw_data = await resp.json()
             try:
-                resp = await fetch(f"{BACKEND_URL}/state")
-                raw_data = await resp.json()
-                try:
-                    data = raw_data.to_py()
-                except AttributeError:
-                    data = raw_data
+                data = raw_data.to_py()
+            except AttributeError:
+                data = raw_data
 
-                if not isinstance(data, dict):
-                    print("MP POLL ERROR – response nie jest dict:", data)
-                    await asyncio.sleep(1.5)
-                    continue
+            if not isinstance(data, dict):
+                print("MP POLL ERROR – response nie jest dict:", data)
+                await asyncio.sleep(1.5)
+                continue
 
-                t = data.get("time_left", 0)
-                txt_mp_timer.value = f"Czas: {int(t)} s"
-                txt_mp_pot.value = f"Pula: {data.get('pot', 0)} zł"
+            # TIMER & PULA
+            t = data.get("time_left", 0)
+            txt_mp_timer.value = f"Czas: {int(t)} s"
+            txt_mp_pot.value = f"Pula: {data.get('pot', 0)} zł"
 
-                col_mp_players.controls.clear()
-                for p in data.get("players", []):
-                    # p to dict z backendu
-                    name = p.get("name", "???")
-                    bid = p.get("bid", 0)
-                    money = p.get("money", 0)
-                    is_all_in = p.get("is_all_in", False)
-                    line = f"{name}: stawka {bid} zł, saldo {money} zł"
-                    if is_all_in:
-                        line += " (VA BANQUE)"
-                    col_mp_players.controls.append(
-                        ft.Text(line, size=14)
-                    )
+            # PLAYERS
+            col_mp_players.controls.clear()
+            for p in data.get("players", []):
+                name = p.get("name", "???")
+                bid = p.get("bid", 0)
+                money = p.get("money", 0)
+                is_all_in = p.get("is_all_in", False)
 
-                col_mp_chat.controls.clear()
-                for m in data.get("chat", []):
-                    player = m.get("player", "???")
-                    msg = m.get("message", "")
-                    col_mp_chat.controls.append(
-                        ft.Text(f"{player}: {msg}", size=13)
-                    )
+                line = f"{name}: stawka {bid} zł, saldo {money} zł"
+                if is_all_in:
+                    line += " (VA BANQUE)"
 
-                page.update()
-            except Exception as ex:
-                print("MP POLL ERROR", ex)
-            await asyncio.sleep(1.5)
+                col_mp_players.controls.append(
+                    ft.Text(line, size=14)
+                )
+
+            # CHAT
+            col_mp_chat.controls.clear()
+            for m in data.get("chat", []):
+                player = m.get("player", "???")
+                msg = m.get("message", "")
+                col_mp_chat.controls.append(
+                    ft.Text(f"{player}: {msg}", size=13)
+                )
+
+            page.update()
+
+        except Exception as ex:
+            print("MP POLL ERROR", ex)
+
+        await asyncio.sleep(1.5)
+
 
     # ------------------- HANDLERS PRZYCISKÓW ------------------------
 
