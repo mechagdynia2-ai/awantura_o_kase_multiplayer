@@ -715,7 +715,7 @@ async def main(page: ft.Page):
     # ------------------- MULTIPLAYER LOGIKA ------------------------
 
     async def mp_register(e):
-    name = (txt_mp_name.value or "").strip()
+        name = (txt_mp_name.value or "").strip()
     if not name:
         txt_mp_status.value = "Podaj ksywkę, aby dołączyć."
         txt_mp_status.color = "red"
