@@ -53,8 +53,8 @@ jobs:
     # --- NOWY KROK — usuwa stare buildy ---------------------------------------------------------
     - name: Clean previous builds
       run: |
-        flutter clean
         rm -rf build
+
   # --- koniec NOWY KROK — usuwa stare buildy ---------------------------------------------------------
     - name: Flet Build Web
       run: |
