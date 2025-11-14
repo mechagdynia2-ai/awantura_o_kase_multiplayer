@@ -150,7 +150,7 @@ async def main(page: ft.Page):
                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                            visible=False)
 
-    btn_bid = ft.FilledButton(width=400)
+    btn_bid = ft.FilledButton("...", width=400)
     btn_show_question = ft.FilledButton("Pokaż pytanie", width=400)
     bidding_panel = ft.Column([btn_bid, btn_show_question],
                               horizontal_alignment=ft.CrossAxisAlignment.CENTER,
