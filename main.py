@@ -4,31 +4,27 @@ import re
 from thefuzz import fuzz
 from js import fetch
 import warnings
+import json
 
 BACKEND_URL = "https://game-multiplayer-qfn1.onrender.com"
 
 warnings.filterwarnings("ignore")
 
 # -----------------------------------------------------------------------------
-#  ŁADOWANIE PLIKÓW TYLKO Z GITHUB RAW
+#  ŁADOWANIE PLIKÓW TYLKO Z GITHUB RAW (pytania 01–50)
 # -----------------------------------------------------------------------------
 GITHUB_RAW_BASE_URL = "https://raw.githubusercontent.com/mechagdynia2-ai/game/main/assets/"
 
 
 # -----------------------------------------------------------------------------
-#  FUNKCJA NAPRAWIAJĄCA RUN_TASK (kluczowe!)
+#  RUN_TASK HELPER DLA ASYNC on_click
 # -----------------------------------------------------------------------------
 def make_async_click(async_callback):
-    """
-    async_callback – funkcja async(e)
-    Zwraca handler on_click kompatybilny z page.run_task()
-    """
-
+    # Zwraca handler on_click kompatybilny z page.run_task()
     def handler(e):
         async def task():
             await async_callback(e)
 
-        # Flet 0.28.3 wymaga, by run_task dostawał funkcję async, nie coroutine
         e.page.run_task(task)
 
     return handler
@@ -125,7 +121,7 @@ def normalize_answer(text: str) -> str:
 #  GŁÓWNA FUNKCJA APLIKACJI
 # -----------------------------------------------------------------------------
 async def main(page: ft.Page):
-    page.title = "Awantura o Kasę – Singleplayer"
+    page.title = "Awantura o Kasę – Multiplayer BETA"
     page.scroll = ft.ScrollMode.AUTO
     page.theme_mode = ft.ThemeMode.LIGHT
     page.vertical_alignment = ft.MainAxisAlignment.START
@@ -148,8 +144,10 @@ async def main(page: ft.Page):
         "set_name": ""
     }
 
+    player_name = ""  # nazwa gracza do pokoju / czatu
+
     # -----------------------------------------------------
-    #  UI – TEKSTY I KONTROLKI
+    #  UI – GÓRA EKRANU (KASA, PYTANIE, ITD.)
     # -----------------------------------------------------
     txt_money = ft.Text(
         f"Twoja kasa: {game['money']} zł",
@@ -211,9 +209,7 @@ async def main(page: ft.Page):
         visible=False
     )
 
-    # -----------------------------------------------------
-    #  KONTROLKI LICYTACJI
-    # -----------------------------------------------------
+    # LICYTACJA
     btn_bid = ft.FilledButton(width=400)
     btn_show_question = ft.FilledButton("Pokaż pytanie", width=400)
 
@@ -223,9 +219,7 @@ async def main(page: ft.Page):
         visible=False
     )
 
-    # -----------------------------------------------------
-    #  DODATKOWE PRZYCISKI
-    # -----------------------------------------------------
+    # DODATKOWE PRZYCISKI
     btn_5050 = ft.OutlinedButton(
         "Kup podpowiedź 50/50 (losowo 500-2500 zł)",
         width=400,
@@ -247,9 +241,6 @@ async def main(page: ft.Page):
         width=400, visible=False, style=ft.ButtonStyle(color="red")
     )
 
-    # -----------------------------------------------------
-    #  WIDOK – GŁÓWNY EKRAN GRY
-    # -----------------------------------------------------
     game_view = ft.Column(
         [
             ft.Container(
@@ -288,7 +279,7 @@ async def main(page: ft.Page):
     )
 
     # -----------------------------------------------------
-    #  WIDOK MENU GŁÓWNEGO
+    #  MENU + RANKING
     # -----------------------------------------------------
     main_feedback = ft.Text("", color="red", visible=False)
 
@@ -311,12 +302,10 @@ async def main(page: ft.Page):
             on_click=make_async_click(click)
         )
 
-    # kafelki zestawów
     menu_standard = [menu_tile(i, "blue_grey_50") for i in range(1, 31)]
     menu_pop = [menu_tile(i, "deep_purple_50") for i in range(31, 41)]
     menu_music = [menu_tile(i, "amber_50") for i in range(41, 51)]
 
-    # przycisk i widok rankingu
     btn_rank = ft.FilledButton("Ranking", width=300)
 
     rank_view = ft.Column(
@@ -355,6 +344,74 @@ async def main(page: ft.Page):
         visible=True
     )
 
+    # -----------------------------------------------------
+    #  POKÓJ GRACZY – UI
+    # -----------------------------------------------------
+    txt_player_name = ft.TextField(
+        label="Twoje imię w pokoju",
+        width=300
+    )
+
+    btn_join_room = ft.FilledButton(
+        "Dołącz do pokoju",
+        width=300
+    )
+
+    players_list = ft.Column(
+        [],
+        scroll=ft.ScrollMode.AUTO,
+        height=200,
+        width=320,
+        bgcolor="#f5f5f5",
+        border_radius=10,
+        padding=10
+    )
+
+    # -----------------------------------------------------
+    #  CZAT – UI
+    # -----------------------------------------------------
+    chat_column = ft.Column(
+        [],
+        height=250,
+        width=320,
+        scroll=ft.ScrollMode.AUTO,
+        bgcolor="#ffffff",
+        border_radius=10,
+        padding=10
+    )
+
+    chat_input = ft.TextField(
+        label="Napisz wiadomość",
+        width=300
+    )
+
+    btn_send_chat = ft.FilledButton(
+        "Wyślij",
+        width=300
+    )
+
+    room_view = ft.Column(
+        [
+            ft.Divider(),
+            ft.Text("Pokój graczy", size=20, weight=ft.FontWeight.BOLD),
+
+            txt_player_name,
+            btn_join_room,
+
+            ft.Text("Gracze online:", size=16, weight=ft.FontWeight.BOLD),
+            players_list,
+
+            ft.Divider(),
+            ft.Text("Czat", size=20, weight=ft.FontWeight.BOLD),
+
+            chat_column,
+            chat_input,
+            btn_send_chat,
+        ],
+        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        visible=True
+    )
+
     # =====================================================
     #  FUNKCJE POMOCNICZE – UPDATE UI
     # =====================================================
@@ -388,8 +445,28 @@ async def main(page: ft.Page):
         page.update(txt_counter)
 
     # =====================================================
-    #  GAME OVER
+    #  GAME OVER + ZAPIS WYNIKU
     # =====================================================
+    async def send_score(player: str, score: int, time_ms: int):
+        try:
+            payload = {
+                "player": player,
+                "score": score,
+                "time": time_ms
+            }
+
+            await fetch(
+                f"{BACKEND_URL}/submit",
+                {
+                    "method": "POST",
+                    "headers": {"Content-Type": "application/json"},
+                    "body": json.dumps(payload)
+                }
+            )
+            print("[RANKING] Wynik wysłany:", payload)
+        except Exception as e:
+            print("[RANKING ERROR]", e)
+
     def show_game_over(msg: str):
         btn_5050.disabled = True
         btn_buy_abcd.disabled = True
@@ -412,16 +489,11 @@ async def main(page: ft.Page):
         page.dialog = dlg
         dlg.open = True
 
-        # --- ZAPIS WYNIKU DO BACKENDU ---
-        async def _task():
-            await send_score(
-                player="Gracz",  # TODO: dodać input na imię
-                score=game["money"],
-                time_ms=0        # TODO: dodać licznik czasu
-            )
+        async def _send():
+            name = player_name or "Gracz"
+            await send_score(name, game["money"], 0)
 
-        page.run_task(_task)
-
+        page.run_task(_send)
         page.update()
 
     # =====================================================
@@ -447,17 +519,14 @@ async def main(page: ft.Page):
         similarity = fuzz.ratio(norm_user, norm_correct)
 
         if similarity >= 80:
-            # DOBRA odpowiedź – gracz zabiera pulę
             game["money"] += pot
             game["main_pot"] = 0
             txt_feedback.value = f"DOBRZE! ({similarity}%) +{pot} zł\nPoprawna: {correct}"
             txt_feedback.color = "green"
         else:
-            # ZŁA odpowiedź – pula przechodzi dalej
             txt_feedback.value = f"ŹLE ({similarity}%) – pula przechodzi dalej.\nPoprawna: {correct}"
             txt_feedback.color = "red"
 
-        # Kluczowe: RESET licytacji na następne pytanie
         game["bid"] = 0
         game["bonus"] = 0
 
@@ -470,15 +539,9 @@ async def main(page: ft.Page):
 
         page.update()
 
-    # =====================================================
-    #  SUBMIT ODPOWIEDZI
-    # =====================================================
     def submit_answer(e):
         check_answer(txt_answer.value)
 
-    # =====================================================
-    #  ABCD – KLIKANIE W PRZYCISKI
-    # =====================================================
     def abcd_click(e):
         check_answer(e.control.data)
 
@@ -515,7 +578,7 @@ async def main(page: ft.Page):
             if b.data in to_disable:
                 b.disabled = True
                 b.opacity = 0.3
-                b.on_click = None  # kluczowe dla Web / Pyodide
+                b.on_click = None
                 b.update()
 
         txt_feedback.value = f"Usunięto 2 błędne odpowiedzi! (koszt {cost} zł)"
@@ -600,7 +663,6 @@ async def main(page: ft.Page):
         answers_column.visible = False
         answers_column.controls.clear()
 
-        # kluczowe – usuwa stary tekst np. „DOBRZE +2500 zł!”
         txt_feedback.value = "Odpowiedz na pytanie:"
         txt_feedback.color = "black"
 
@@ -662,7 +724,7 @@ async def main(page: ft.Page):
             show_game_over(f"Zestaw {game['set_name']} nie zawiera pytań. Wybierz inny zestaw.")
             return
 
-        stake = game["base_stake"]  # 500
+        stake = game["base_stake"]
 
         if game["money"] < stake:
             show_game_over(f"Nie masz {stake} zł na rozpoczęcie gry!")
@@ -700,7 +762,7 @@ async def main(page: ft.Page):
         page.update()
 
     # =====================================================
-    #  RESET GRY DLA TEGO SAMEGO ZESTAWU
+    #  RESET GRY
     # =====================================================
     def reset_game():
         game["money"] = 10000
@@ -729,32 +791,7 @@ async def main(page: ft.Page):
         page.update()
 
     # =====================================================
-    #  WYSYŁANIE WYNIKU DO BACKENDU
-    # =====================================================
-    async def send_score(player: str, score: int, time_ms: int):
-        try:
-            payload = {
-                "player": player,
-                "score": score,
-                "time": time_ms
-            }
-
-            await fetch(
-                f"{BACKEND_URL}/submit",
-                {
-                    "method": "POST",
-                    "headers": {"Content-Type": "application/json"},
-                    "body": __import__("json").dumps(payload)
-                }
-            )
-
-            print("[RANKING] Wynik wysłany:", payload)
-
-        except Exception as e:
-            print("[RANKING ERROR]", e)
-
-    # =====================================================
-    #  ŁADOWANIE RANKINGU
+    #  RANKING – POBIERANIE
     # =====================================================
     async def load_rank(e):
         try:
@@ -778,6 +815,86 @@ async def main(page: ft.Page):
             print("[RANK ERROR]", ex)
 
     # =====================================================
+    #  POKÓJ GRACZY – BACKEND
+    # =====================================================
+    async def refresh_players():
+        try:
+            response = await fetch(f"{BACKEND_URL}/players")
+            data = await response.json()
+
+            players_list.controls.clear()
+            for p in data:
+                players_list.controls.append(
+                    ft.Text(f"• {p.get('name', 'Gracz')}")
+                )
+            players_list.update()
+        except Exception as e:
+            print("[PLAYERS ERROR]", e)
+
+    async def join_room(e):
+        nonlocal player_name
+        name = txt_player_name.value.strip() or "Gracz"
+        player_name = name
+
+        try:
+            await fetch(
+                f"{BACKEND_URL}/players/join",
+                {
+                    "method": "POST",
+                    "headers": {"Content-Type": "application/json"},
+                    "body": json.dumps({"name": name})
+                }
+            )
+            txt_player_name.disabled = True
+            btn_join_room.disabled = True
+            await refresh_players()
+            page.update()
+        except Exception as ex:
+            print("[JOIN ERROR]", ex)
+
+    # =====================================================
+    #  CZAT – BACKEND
+    # =====================================================
+    async def refresh_chat():
+        try:
+            response = await fetch(f"{BACKEND_URL}/chat")
+            data = await response.json()
+
+            chat_column.controls.clear()
+            for msg in data[-50:]:
+                line = f"{msg.get('time','')} | {msg.get('player','?')}: {msg.get('message','')}"
+                chat_column.controls.append(ft.Text(line))
+            chat_column.update()
+        except Exception as e:
+            print("[CHAT LOAD ERROR]", e)
+
+    async def send_chat(e):
+        name = player_name or txt_player_name.value.strip() or "Gracz"
+        message = chat_input.value.strip()
+        if not message:
+            return
+
+        payload = {
+            "player": name,
+            "message": message
+        }
+
+        try:
+            await fetch(
+                f"{BACKEND_URL}/chat",
+                {
+                    "method": "POST",
+                    "headers": {"Content-Type": "application/json"},
+                    "body": json.dumps(payload)
+                }
+            )
+            chat_input.value = ""
+            chat_input.update()
+            await refresh_chat()
+        except Exception as ex:
+            print("[CHAT SEND ERROR]", ex)
+
+    # =====================================================
     #  POWRÓT DO MENU
     # =====================================================
     def back_to_menu(e):
@@ -790,7 +907,7 @@ async def main(page: ft.Page):
         page.update()
 
     # =====================================================
-    #  START SESJI GRY – NAJCZĘŚCIEJ WYWOŁYWANA FUNKCJA
+    #  START SESJI GRY
     # =====================================================
     async def start_game_session(e, filename: str):
         print(f"[LOAD] Pobieram zestaw: {filename}")
@@ -804,7 +921,7 @@ async def main(page: ft.Page):
 
         main_menu.visible = False
         game_view.visible = True
-        main_feedback.visible = False  # Ukryj komunikat błędu z poprzedniego ładowania
+        main_feedback.visible = False
         page.update()
 
         start_bidding(None)
@@ -820,24 +937,26 @@ async def main(page: ft.Page):
     btn_next.on_click = start_bidding
     btn_rank.on_click = make_async_click(load_rank)
     btn_back.on_click = back_to_menu
+    btn_join_room.on_click = make_async_click(join_room)
+    btn_send_chat.on_click = make_async_click(send_chat)
 
     # =====================================================
     #  DODANIE WIDOKÓW NA STRONĘ
     # =====================================================
     page.add(
         main_menu,
-        game_view
+        game_view,
+        room_view
     )
 
     page.update()
 
 
 # =========================================================
-#  START APLIKACJI — URUCHOMIENIE
+#  START APLIKACJI — LOKALNIE (Python)
 # =========================================================
 if __name__ == "__main__":
     try:
-        # Użycie `web_renderer="html"` może poprawić kompatybilność, jeśli problemem jest renderowanie.
         ft.app(target=main)
     finally:
         import asyncio
@@ -845,5 +964,5 @@ if __name__ == "__main__":
         try:
             loop = asyncio.get_event_loop()
             loop.close()
-        except:
+        except Exception:
             pass
