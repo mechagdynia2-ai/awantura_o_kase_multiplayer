@@ -715,48 +715,61 @@ async def main(page: ft.Page):
     # ------------------- MULTIPLAYER LOGIKA ------------------------
 
     async def mp_register(e):
-        name = (txt_mp_name.value or "").strip()
-        if not name:
-            txt_mp_status.value = "Podaj ksywkę, aby dołączyć."
+    name = (txt_mp_name.value or "").strip()
+    if not name:
+        txt_mp_status.value = "Podaj ksywkę, aby dołączyć."
+        txt_mp_status.color = "red"
+        page.update(txt_mp_status)
+        return
+
+    try:
+        # --- WAŻNE: poprawiony fetch dla PYODIDE ---
+        payload = __import__("json").dumps({"name": name})
+
+        resp = await fetch(
+            f"{BACKEND_URL}/register",
+            js.Object.fromEntries([
+                ["method", "POST"],
+                ["headers", js.Object.fromEntries([
+                    ["Content-Type", "application/json"]
+                ])],
+                ["body", payload]
+            ])
+        )
+
+        raw = await resp.json()
+
+        # Konwersja JsProxy -> Python dict
+        try:
+            data = raw.to_py()
+        except:
+            data = raw
+
+        if not isinstance(data, dict) or "id" not in data:
+            print("MP REGISTER RAW RESPONSE:", data)
+            txt_mp_status.value = "Brak id gracza w odpowiedzi backendu"
             txt_mp_status.color = "red"
             page.update(txt_mp_status)
             return
-        try:
-            resp = await fetch(
-                f"{BACKEND_URL}/register",
-                {
-                    "method": "POST",
-                    "headers": {"Content-Type": "application/json"},
-                    "body": __import__("json").dumps({"name": name}),
-                },
-            )
-            # resp.json() -> JsProxy, trzeba zrzucić do dict
-            raw_data = await resp.json()
-            try:
-                data = raw_data.to_py()
-            except AttributeError:
-                data = raw_data
 
-            if not isinstance(data, dict) or "id" not in data:
-                print("MP REGISTER RAW RESPONSE:", data)
-                txt_mp_status.value = "Brak id gracza w odpowiedzi backendu"
-                txt_mp_status.color = "red"
-                page.update(txt_mp_status)
-                return
+        # ZAPISUJEMY GRACZA
+        mp_state["player_id"] = data["id"]
+        mp_state["player_name"] = data.get("name", name)
 
-            mp_state["player_id"] = data.get("id")
-            mp_state["player_name"] = data.get("name", name)
-            txt_mp_status.value = f"Dołączono jako {mp_state['player_name']}."
-            txt_mp_status.color = "green"
-            btn_mp_bid.disabled = False
-            btn_mp_allin.disabled = False
-            btn_mp_chat_send.disabled = False
-            page.update()
-        except Exception as ex:
-            print("MP REGISTER ERROR", ex)
-            txt_mp_status.value = "Błąd połączenia z serwerem multiplayer."
-            txt_mp_status.color = "red"
-            page.update(txt_mp_status)
+        txt_mp_status.value = f"Dołączono jako {mp_state['player_name']}."
+        txt_mp_status.color = "green"
+
+        btn_mp_bid.disabled = False
+        btn_mp_allin.disabled = False
+        btn_mp_chat_send.disabled = False
+        page.update()
+
+    except Exception as ex:
+        print("MP REGISTER ERROR", ex)
+        txt_mp_status.value = "Błąd połączenia z serwerem multiplayer."
+        txt_mp_status.color = "red"
+        page.update(txt_mp_status)
+
 
     async def mp_bid(kind: str):
         if not mp_state["player_id"]:
