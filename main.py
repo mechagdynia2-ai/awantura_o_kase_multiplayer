@@ -270,7 +270,7 @@ async def main(page: ft.Page):
         ),
         padding=15,
         border_radius=10,
-        bgcolor=ft.colors.BLUE_50,
+        bgcolor=ft.Colors.BLUE_50,
     )
 
     main_menu = ft.Column(
