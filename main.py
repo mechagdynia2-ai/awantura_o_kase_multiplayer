@@ -733,7 +733,7 @@ async def main(page: ft.Page):
 
     page.add(main_menu, game_view)
     page.update()
-    page.run_task(mp_poll_state())
+    page.run_task(mp_poll_state)
 
 
 if __name__ == "__main__":
