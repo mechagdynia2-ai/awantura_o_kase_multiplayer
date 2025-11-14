@@ -64,7 +64,7 @@ jobs:
             # --- KLUCZOWA POPRAWKA ---
             # Usunęliśmy błędną flagę '--assets .'
             # Polegamy teraz w 100% na `ft.app(assets_dir=".")` w main.py
-            flet build web --base-url /game/ --route-url-strategy hash
+            flet build web --base-url /awantura_o_kase_multiplayer/ --route-url-strategy hash
 
     # --- KROK DEBUGOWANIA (NADAL WAŻNY) ---
     - name: Add .nojekyll and List files (Debug)
