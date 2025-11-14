@@ -8,14 +8,6 @@ import asyncio
 
 warnings.filterwarnings("ignore")
 
-# Próba importu konwertera z JsProxy -> normalne typy Pythona (Pyodide)
-try:
-    from pyodide.ffi import to_py as js_to_py
-except Exception:  # poza przeglądarką po prostu nic nie robi
-    def js_to_py(x):
-        return x
-
-
 BACKEND_URL = "https://game-multiplayer-qfn1.onrender.com"
 GITHUB_RAW_BASE_URL = "https://raw.githubusercontent.com/mechagdynia2-ai/game/main/assets/"
 
@@ -133,63 +125,67 @@ async def main(page: ft.Page):
         f"Twoja kasa: {game['money']} zł",
         size=16,
         weight=ft.FontWeight.BOLD,
-        color="green_600"
+        color="green_600",
     )
     txt_spent = ft.Text(
         "Wydano: 0 zł",
         size=14,
         color="grey_700",
-        text_align=ft.TextAlign.RIGHT
+        text_align=ft.TextAlign.RIGHT,
     )
     txt_counter = ft.Text(
         "Pytanie 0 / 0 (Zestaw 00)",
         size=16,
         color="grey_700",
-        text_align=ft.TextAlign.CENTER
+        text_align=ft.TextAlign.CENTER,
     )
     txt_pot = ft.Text(
         "AKTUALNA PULA: 0 zł",
         size=22,
         weight=ft.FontWeight.BOLD,
         color="purple_600",
-        text_align=ft.TextAlign.CENTER
+        text_align=ft.TextAlign.CENTER,
     )
     txt_bonus = ft.Text(
         "Bonus od banku: 0 zł",
         size=16,
         color="blue_600",
         text_align=ft.TextAlign.CENTER,
-        visible=False
+        visible=False,
     )
     txt_question = ft.Text(
         "Wciśnij 'Start', aby rozpocząć grę!",
         size=18,
         weight=ft.FontWeight.BOLD,
-        text_align=ft.TextAlign.CENTER
+        text_align=ft.TextAlign.CENTER,
     )
-    txt_feedback = ft.Text("", size=16, text_align=ft.TextAlign.CENTER)
+    txt_feedback = ft.Text(
+        "",
+        size=16,
+        text_align=ft.TextAlign.CENTER,
+    )
 
     txt_answer = ft.TextField(
         label="Wpisz swoją odpowiedź...",
         width=400,
-        text_align=ft.TextAlign.CENTER
+        text_align=ft.TextAlign.CENTER,
     )
     btn_submit_answer = ft.FilledButton(
         "Zatwierdź odpowiedź",
         icon=ft.Icons.CHECK,
-        width=400
+        width=400,
     )
 
     answers_column = ft.Column(
         [],
         spacing=10,
         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-        visible=False
+        visible=False,
     )
     answer_box = ft.Column(
         [txt_answer, btn_submit_answer, answers_column],
         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-        visible=False
+        visible=False,
     )
 
     btn_bid = ft.FilledButton("...", width=400)
@@ -197,18 +193,18 @@ async def main(page: ft.Page):
     bidding_panel = ft.Column(
         [btn_bid, btn_show_question],
         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-        visible=False
+        visible=False,
     )
 
     btn_5050 = ft.OutlinedButton(
         "Kup podpowiedź 50/50 (losowo 500-2500 zł)",
         width=400,
-        disabled=True
+        disabled=True,
     )
     btn_buy_abcd = ft.OutlinedButton(
         "Kup opcje ABCD (losowo 1000-3000 zł)",
         width=400,
-        disabled=True
+        disabled=True,
     )
     btn_next = ft.FilledButton("Następne pytanie", width=400, visible=False)
     btn_back = ft.OutlinedButton(
@@ -216,7 +212,7 @@ async def main(page: ft.Page):
         icon=ft.Icons.ARROW_BACK,
         width=400,
         visible=False,
-        style=ft.ButtonStyle(color="red")
+        style=ft.ButtonStyle(color="red"),
     )
 
     game_view = ft.Column(
@@ -224,9 +220,9 @@ async def main(page: ft.Page):
             ft.Container(
                 ft.Row(
                     [txt_money, txt_spent],
-                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                 ),
-                padding=ft.padding.only(left=20, right=20, top=10, bottom=5)
+                padding=ft.padding.only(left=20, right=20, top=10, bottom=5),
             ),
             ft.Divider(height=1, color="grey_300"),
             ft.Container(txt_counter, alignment=ft.alignment.center),
@@ -235,8 +231,10 @@ async def main(page: ft.Page):
             ft.Container(
                 txt_question,
                 alignment=ft.alignment.center,
-                padding=ft.padding.only(left=20, right=20, top=10, bottom=10),
-                height=100
+                padding=ft.padding.only(
+                    left=20, right=20, top=10, bottom=10
+                ),
+                height=100,
             ),
             bidding_panel,
             answer_box,
@@ -244,15 +242,13 @@ async def main(page: ft.Page):
             ft.Column(
                 [btn_5050, btn_buy_abcd, btn_next, txt_feedback, btn_back],
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                spacing=10
+                spacing=10,
             ),
         ],
-        visible=False
+        visible=False,
     )
 
     main_feedback = ft.Text("", color="red", visible=False)
-
-    # ------------------ MENU / WYBÓR ZESTAWU ------------------ #
 
     def menu_tile(i, color):
         filename = f"{i:02d}.txt"
@@ -265,7 +261,7 @@ async def main(page: ft.Page):
                 f"{i:02d}",
                 size=14,
                 weight=ft.FontWeight.BOLD,
-                color="black"
+                color="black",
             ),
             width=46,
             height=46,
@@ -273,25 +269,24 @@ async def main(page: ft.Page):
             bgcolor=color,
             border_radius=100,
             padding=0,
-            on_click=make_async_click(click)
+            on_click=make_async_click(click),
         )
 
     menu_standard = [menu_tile(i, "blue_grey_50") for i in range(1, 31)]
     menu_pop = [menu_tile(i, "deep_purple_50") for i in range(31, 41)]
     menu_music = [menu_tile(i, "amber_50") for i in range(41, 51)]
 
-    # ------------------ MULTIPLAYER UI ------------------ #
-
+    # --- MULTIPLAYER UI ---------------------------------------------------
     txt_mp_title = ft.Text(
         "Tryb multiplayer (beta) – wspólna licytacja 20 s",
         size=20,
-        weight=ft.FontWeight.BOLD
+        weight=ft.FontWeight.BOLD,
     )
     txt_mp_info = ft.Text(
         "Dołącz do pokoju, licytuj +100 zł albo idź VA BANQUE.\n"
         "Pula i stawki wszystkich graczy aktualizują się na żywo.",
         size=14,
-        color="grey_700"
+        color="grey_700",
     )
     txt_mp_name = ft.TextField(label="Twoja ksywka", width=220)
     btn_mp_join = ft.FilledButton("Dołącz do pokoju", width=180)
@@ -302,20 +297,22 @@ async def main(page: ft.Page):
         "Pula: 0 zł",
         size=18,
         weight=ft.FontWeight.BOLD,
-        color="purple"
+        color="purple",
     )
 
     btn_mp_bid = ft.FilledButton(
-        "Licytuj +100 zł (multiplayer)",
-        width=250,
-        disabled=True
+        "Licytuj +100 zł (multiplayer)", width=250, disabled=True
     )
-    btn_mp_allin = ft.FilledButton("VA BANQUE!", width=250, disabled=True)
+    btn_mp_allin = ft.FilledButton(
+        "VA BANQUE!", width=250, disabled=True
+    )
 
     col_mp_players = ft.Column([], height=160, scroll=ft.ScrollMode.AUTO)
     col_mp_chat = ft.Column([], height=160, scroll=ft.ScrollMode.AUTO)
     txt_mp_chat = ft.TextField(label="Napisz na czacie", expand=True)
-    btn_mp_chat_send = ft.FilledButton("Wyślij", width=100, disabled=True)
+    btn_mp_chat_send = ft.FilledButton(
+        "Wyślij", width=100, disabled=True
+    )
 
     multiplayer_room = ft.Container(
         ft.Column(
@@ -325,13 +322,16 @@ async def main(page: ft.Page):
                 ft.Row([txt_mp_name, btn_mp_join], alignment="start"),
                 txt_mp_status,
                 ft.Divider(),
-                ft.Row([txt_mp_timer, txt_mp_pot], alignment="spaceBetween"),
+                ft.Row(
+                    [txt_mp_timer, txt_mp_pot],
+                    alignment="spaceBetween",
+                ),
                 ft.Row([btn_mp_bid, btn_mp_allin], alignment="start"),
                 ft.Row(
                     [
                         ft.Column(
                             [ft.Text("Gracze:", weight="bold"), col_mp_players],
-                            width=260
+                            width=260,
                         ),
                         ft.Column(
                             [
@@ -349,7 +349,7 @@ async def main(page: ft.Page):
         ),
         padding=15,
         border_radius=10,
-        bgcolor=ft.Colors.BLUE_50,
+        bgcolor=ft.Colors.BLUE_50,  # zostawiamy dokładnie tak
     )
 
     main_menu = ft.Column(
@@ -372,10 +372,10 @@ async def main(page: ft.Page):
         ],
         spacing=10,
         horizontal_alignment="center",
-        visible=True
+        visible=True,
     )
 
-    # ------------------ FUNKCJE SINGLEPLAYER ------------------ #
+    # ------------------- SINGLEPLAYER LOGIKA ------------------------
 
     def refresh_money():
         txt_money.value = f"Twoja kasa: {game['money']} zł"
@@ -418,8 +418,12 @@ async def main(page: ft.Page):
             modal=True,
             title=ft.Text("Koniec gry!"),
             content=ft.Text(msg),
-            actions=[ft.TextButton("Wróć do menu",
-                                  on_click=lambda e: back_to_menu(e))],
+            actions=[
+                ft.TextButton(
+                    "Wróć do menu",
+                    on_click=lambda e: back_to_menu(e),
+                )
+            ],
         )
         page.dialog = dlg
         dlg.open = True
@@ -532,7 +536,12 @@ async def main(page: ft.Page):
         random.shuffle(shuffled)
         for ans in shuffled:
             answers_column.controls.append(
-                ft.FilledButton(ans, width=400, data=ans, on_click=abcd_click)
+                ft.FilledButton(
+                    ans,
+                    width=400,
+                    data=ans,
+                    on_click=abcd_click,
+                )
             )
 
         txt_feedback.value = f"Kupiono ABCD (koszt {cost} zł)"
@@ -541,12 +550,14 @@ async def main(page: ft.Page):
 
     def start_question(e):
         game["current_question_index"] += 1
-        if not game["questions"] or game["current_question_index"] >= game["total"]:
+        if (
+            not game["questions"]
+            or game["current_question_index"] >= game["total"]
+        ):
             if not game["questions"]:
                 show_game_over(
-                    "Błąd: Zestaw "
-                    f"{game['set_name']} nie zawiera pytań w poprawnym "
-                    "formacie. Spróbuj innego zestawu."
+                    f"Błąd: Zestaw {game['set_name']} nie zawiera pytań "
+                    f"w poprawnym formacie. Spróbuj innego zestawu."
                 )
             else:
                 show_game_over(
@@ -622,7 +633,7 @@ async def main(page: ft.Page):
         if not game["questions"]:
             show_game_over(
                 f"Zestaw {game['set_name']} nie zawiera pytań. "
-                "Wybierz inny zestaw."
+                f"Wybierz inny zestaw."
             )
             return
 
@@ -701,7 +712,7 @@ async def main(page: ft.Page):
         page.update()
         start_bidding(None)
 
-    # ------------------ MULTIPLAYER – BACKEND CALLS ------------------ #
+    # ------------------- MULTIPLAYER LOGIKA ------------------------
 
     async def mp_register(e):
         name = (txt_mp_name.value or "").strip()
@@ -716,27 +727,26 @@ async def main(page: ft.Page):
                 {
                     "method": "POST",
                     "headers": {"Content-Type": "application/json"},
-                    "body": __import__("json").dumps({"name": name})
-                }
+                    "body": __import__("json").dumps({"name": name}),
+                },
             )
-            raw = await resp.json()
-            data = js_to_py(raw)
+            # resp.json() -> JsProxy, trzeba zrzucić do dict
+            raw_data = await resp.json()
+            try:
+                data = raw_data.to_py()
+            except AttributeError:
+                data = raw_data
 
-            if isinstance(data, dict):
-                pid = data.get("id")
-                pname = data.get("name", name)
-            else:
-                # awaryjnie, gdyby to był obiekt JS
-                pid = getattr(data, "id", None)
-                pname = getattr(data, "name", name)
+            if not isinstance(data, dict) or "id" not in data:
+                print("MP REGISTER RAW RESPONSE:", data)
+                txt_mp_status.value = "Brak id gracza w odpowiedzi backendu"
+                txt_mp_status.color = "red"
+                page.update(txt_mp_status)
+                return
 
-            if not pid:
-                raise RuntimeError("Brak id gracza w odpowiedzi backendu")
-
-            mp_state["player_id"] = pid
-            mp_state["player_name"] = pname
-
-            txt_mp_status.value = f"Dołączono jako {pname}."
+            mp_state["player_id"] = data.get("id")
+            mp_state["player_name"] = data.get("name", name)
+            txt_mp_status.value = f"Dołączono jako {mp_state['player_name']}."
             txt_mp_status.color = "green"
             btn_mp_bid.disabled = False
             btn_mp_allin.disabled = False
@@ -762,31 +772,39 @@ async def main(page: ft.Page):
                     "headers": {"Content-Type": "application/json"},
                     "body": __import__("json").dumps(
                         {"player_id": mp_state["player_id"], "kind": kind}
-                    )
-                }
+                    ),
+                },
             )
 
             status = getattr(resp, "status", None)
 
-            raw = await resp.json()
-            data = js_to_py(raw)
-
             if status == 400:
-                if isinstance(data, dict):
-                    detail = data.get("detail", "Błąd licytacji.")
-                else:
-                    detail = getattr(data, "detail", "Błąd licytacji.")
+                raw_err = await resp.json()
+                try:
+                    err = raw_err.to_py()
+                except AttributeError:
+                    err = raw_err
+                detail = (
+                    err.get("detail", "Błąd licytacji.")
+                    if isinstance(err, dict)
+                    else "Błąd licytacji."
+                )
                 txt_mp_status.value = detail
                 txt_mp_status.color = "red"
                 page.update(txt_mp_status)
                 return
 
-            if isinstance(data, dict):
-                pot = data.get("pot", 0)
-            else:
-                pot = getattr(data, "pot", 0)
+            raw_data = await resp.json()
+            try:
+                data = raw_data.to_py()
+            except AttributeError:
+                data = raw_data
 
-            txt_mp_status.value = f"Licytacja przyjęta. Pula: {pot} zł"
+            pot_val = 0
+            if isinstance(data, dict):
+                pot_val = data.get("pot", 0)
+
+            txt_mp_status.value = f"Licytacja przyjęta. Pula: {pot_val} zł"
             txt_mp_status.color = "blue"
             page.update(txt_mp_status)
         except Exception as ex:
@@ -814,8 +832,8 @@ async def main(page: ft.Page):
                     "headers": {"Content-Type": "application/json"},
                     "body": __import__("json").dumps(
                         {"player": name, "message": msg}
-                    )
-                }
+                    ),
+                },
             )
             txt_mp_chat.value = ""
             page.update(txt_mp_chat)
@@ -827,52 +845,41 @@ async def main(page: ft.Page):
         while True:
             try:
                 resp = await fetch(f"{BACKEND_URL}/state")
-                raw = await resp.json()
-                data = js_to_py(raw)
+                raw_data = await resp.json()
+                try:
+                    data = raw_data.to_py()
+                except AttributeError:
+                    data = raw_data
 
-                if isinstance(data, dict):
-                    t = data.get("time_left", 0)
-                    pot = data.get("pot", 0)
-                    players = data.get("players", [])
-                    chat_items = data.get("chat", [])
-                else:
-                    t = getattr(data, "time_left", 0)
-                    pot = getattr(data, "pot", 0)
-                    players = getattr(data, "players", [])
-                    chat_items = getattr(data, "chat", [])
+                if not isinstance(data, dict):
+                    print("MP POLL ERROR – response nie jest dict:", data)
+                    await asyncio.sleep(1.5)
+                    continue
 
+                t = data.get("time_left", 0)
                 txt_mp_timer.value = f"Czas: {int(t)} s"
-                txt_mp_pot.value = f"Pula: {pot} zł"
+                txt_mp_pot.value = f"Pula: {data.get('pot', 0)} zł"
 
                 col_mp_players.controls.clear()
-                for p in players:
-                    # p po js_to_py powinien być dictem
-                    if isinstance(p, dict):
-                        name = p.get("name", "???")
-                        bid = p.get("bid", 0)
-                        money = p.get("money", 0)
-                        is_all_in = p.get("is_all_in", False)
-                    else:
-                        name = getattr(p, "name", "???")
-                        bid = getattr(p, "bid", 0)
-                        money = getattr(p, "money", 0)
-                        is_all_in = getattr(p, "is_all_in", False)
-
+                for p in data.get("players", []):
+                    # p to dict z backendu
+                    name = p.get("name", "???")
+                    bid = p.get("bid", 0)
+                    money = p.get("money", 0)
+                    is_all_in = p.get("is_all_in", False)
                     line = f"{name}: stawka {bid} zł, saldo {money} zł"
                     if is_all_in:
                         line += " (VA BANQUE)"
-                    col_mp_players.controls.append(ft.Text(line, size=14))
+                    col_mp_players.controls.append(
+                        ft.Text(line, size=14)
+                    )
 
                 col_mp_chat.controls.clear()
-                for m in chat_items:
-                    if isinstance(m, dict):
-                        player = m.get("player", "?")
-                        message = m.get("message", "")
-                    else:
-                        player = getattr(m, "player", "?")
-                        message = getattr(m, "message", "")
+                for m in data.get("chat", []):
+                    player = m.get("player", "???")
+                    msg = m.get("message", "")
                     col_mp_chat.controls.append(
-                        ft.Text(f"{player}: {message}", size=13)
+                        ft.Text(f"{player}: {msg}", size=13)
                     )
 
                 page.update()
@@ -880,7 +887,7 @@ async def main(page: ft.Page):
                 print("MP POLL ERROR", ex)
             await asyncio.sleep(1.5)
 
-    # ------------------ PODPIĘCIE HANDLERÓW ------------------ #
+    # ------------------- HANDLERS PRZYCISKÓW ------------------------
 
     btn_submit_answer.on_click = submit_answer
     btn_5050.on_click = hint_5050
@@ -895,12 +902,11 @@ async def main(page: ft.Page):
     btn_mp_allin.on_click = make_async_click(mp_bid_allin)
     btn_mp_chat_send.on_click = make_async_click(mp_send_chat)
 
-    # ------------------ START STRONY ------------------ #
+    # ------------------- START STRONY ------------------------
 
     page.add(main_menu, game_view)
     page.update()
-
-    # WAŻNE: przekazujemy FUNKCJĘ, nie wynik wywołania
+    # UWAGA: przekazujemy funkcję, nie wywołanie
     page.run_task(mp_poll_state)
 
 
