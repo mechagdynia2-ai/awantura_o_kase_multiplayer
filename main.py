@@ -1,10 +1,12 @@
-import flet as ft
+import asyncio
 import random
 import re
-from thefuzz import fuzz
-from js import fetch
 import warnings
-import asyncio
+
+import flet as ft
+import js
+from js import fetch
+from thefuzz import fuzz
 
 warnings.filterwarnings("ignore")
 
@@ -13,14 +15,18 @@ GITHUB_RAW_BASE_URL = "https://raw.githubusercontent.com/mechagdynia2-ai/game/ma
 
 
 def make_async_click(async_callback):
-    def handler(e):
+    """Adapter: async handler → Flet on_click."""
+    def handler(e: ft.ControlEvent):
         async def task():
             await async_callback(e)
+
         e.page.run_task(task)
+
     return handler
 
 
 async def fetch_text(url: str) -> str:
+    """Pobranie pliku tekstowego z GitHuba."""
     try:
         response = await fetch(url)
         return await response.text()
@@ -30,6 +36,12 @@ async def fetch_text(url: str) -> str:
 
 
 async def parse_question_file(page: ft.Page, filename: str) -> list:
+    """Parsowanie pliku z pytaniami w formacie:
+
+    01. Treść pytania...
+    prawidłowa odpowiedz = ...
+    odpowiedz ABCD = A = ..., B = ..., C = ..., D = ...
+    """
     url = f"{GITHUB_RAW_BASE_URL}{filename}"
     print(f"[FETCH] Pobieram: {url}")
     content = await fetch_text(url)
@@ -38,32 +50,36 @@ async def parse_question_file(page: ft.Page, filename: str) -> list:
         return []
 
     parsed = []
+    # Dzielenie po liniach zaczynających się od liczby i kropki (01. / 1. / 123.)
     blocks = re.split(r"\n(?=\d{1,3}\.)", content)
     for block in blocks:
         block = block.strip()
         if not block:
             continue
 
+        # Pytanie
         q_match = re.match(r"^\d{1,3}\.\s*(.+)", block)
         if not q_match:
             print("[WARNING] Nie znaleziono pytania:", block[:50])
             continue
         question = q_match.group(1).strip()
 
+        # Poprawna odpowiedź
         correct_match = re.search(
             r"prawidłowa\s+odpowied[zź]\s*=\s*(.+)",
             block,
-            re.IGNORECASE
+            re.IGNORECASE,
         )
         if not correct_match:
             print("[WARNING] Brak prawidłowej odpowiedzi:", block[:50])
             continue
         correct = correct_match.group(1).strip()
 
+        # Odpowiedzi ABCD
         answers_match = re.search(
             r"odpowied[zź]\s*abcd\s*=\s*A\s*=\s*(.+?),\s*B\s*=\s*(.+?),\s*C\s*=\s*(.+?),\s*D\s*=\s*(.+)",
             block,
-            re.IGNORECASE
+            re.IGNORECASE,
         )
         if not answers_match:
             print("[WARNING] Brak ABCD:", block[:50])
@@ -74,24 +90,37 @@ async def parse_question_file(page: ft.Page, filename: str) -> list:
         c = answers_match.group(3).strip()
         d = answers_match.group(4).strip()
 
-        parsed.append({
-            "question": question,
-            "correct": correct,
-            "answers": [a, b, c, d]
-        })
+        parsed.append(
+            {
+                "question": question,
+                "correct": correct,
+                "answers": [a, b, c, d],
+            }
+        )
 
     return parsed
 
 
 def normalize_answer(text: str) -> str:
+    """Normalizacja odpowiedzi gracza do porównania fuzz.ratio."""
     text = str(text).lower().strip()
     repl = {
-        "ó": "o", "ł": "l", "ż": "z", "ź": "z", "ć": "c",
-        "ń": "n", "ś": "s", "ą": "a", "ę": "e", "ü": "u"
+        "ó": "o",
+        "ł": "l",
+        "ż": "z",
+        "ź": "z",
+        "ć": "c",
+        "ń": "n",
+        "ś": "s",
+        "ą": "a",
+        "ę": "e",
+        "ü": "u",
     }
     for c, r in repl.items():
         text = text.replace(c, r)
+    # Zamiana 'u' → 'o' (łapiemy np. ó/u/o)
     text = text.replace("u", "o")
+    # Usunięcie spacji
     return "".join(text.split())
 
 
@@ -101,6 +130,7 @@ async def main(page: ft.Page):
     page.theme_mode = ft.ThemeMode.LIGHT
     page.vertical_alignment = ft.MainAxisAlignment.START
 
+    # ------------------- STAN GRY SINGLEPLAYER ------------------------
     game = {
         "money": 10000,
         "current_question_index": -1,
@@ -113,14 +143,16 @@ async def main(page: ft.Page):
         "max_bid": 5000,
         "questions": [],
         "total": 0,
-        "set_name": ""
+        "set_name": "",
     }
 
+    # ------------------- STAN MULTIPLAYER -----------------------------
     mp_state = {
         "player_id": None,
         "player_name": "",
     }
 
+    # ------------------- UI GÓRNY PANEL SINGLEPLAYER ------------------
     txt_money = ft.Text(
         f"Twoja kasa: {game['money']} zł",
         size=16,
@@ -232,7 +264,10 @@ async def main(page: ft.Page):
                 txt_question,
                 alignment=ft.alignment.center,
                 padding=ft.padding.only(
-                    left=20, right=20, top=10, bottom=10
+                    left=20,
+                    right=20,
+                    top=10,
+                    bottom=10,
                 ),
                 height=100,
             ),
@@ -250,7 +285,8 @@ async def main(page: ft.Page):
 
     main_feedback = ft.Text("", color="red", visible=False)
 
-    def menu_tile(i, color):
+    # ------------------- MENU ZESTAWÓW PYTAŃ --------------------------
+    def menu_tile(i: int, color: str):
         filename = f"{i:02d}.txt"
 
         async def click(e):
@@ -276,7 +312,7 @@ async def main(page: ft.Page):
     menu_pop = [menu_tile(i, "deep_purple_50") for i in range(31, 41)]
     menu_music = [menu_tile(i, "amber_50") for i in range(41, 51)]
 
-    # --- MULTIPLAYER UI ---------------------------------------------------
+    # ------------------- MULTIPLAYER UI -------------------------------
     txt_mp_title = ft.Text(
         "Tryb multiplayer (beta) – wspólna licytacja 20 s",
         size=20,
@@ -301,17 +337,23 @@ async def main(page: ft.Page):
     )
 
     btn_mp_bid = ft.FilledButton(
-        "Licytuj +100 zł (multiplayer)", width=250, disabled=True
+        "Licytuj +100 zł (multiplayer)",
+        width=250,
+        disabled=True,
     )
     btn_mp_allin = ft.FilledButton(
-        "VA BANQUE!", width=250, disabled=True
+        "VA BANQUE!",
+        width=250,
+        disabled=True,
     )
 
     col_mp_players = ft.Column([], height=160, scroll=ft.ScrollMode.AUTO)
     col_mp_chat = ft.Column([], height=160, scroll=ft.ScrollMode.AUTO)
     txt_mp_chat = ft.TextField(label="Napisz na czacie", expand=True)
     btn_mp_chat_send = ft.FilledButton(
-        "Wyślij", width=100, disabled=True
+        "Wyślij",
+        width=100,
+        disabled=True,
     )
 
     multiplayer_room = ft.Container(
@@ -349,7 +391,7 @@ async def main(page: ft.Page):
         ),
         padding=15,
         border_radius=10,
-        bgcolor=ft.Colors.BLUE_50,  # zostawiamy dokładnie tak
+        bgcolor="blue_50",
     )
 
     main_menu = ft.Column(
@@ -365,7 +407,11 @@ async def main(page: ft.Page):
             ft.Text("Pytania popkultura:", size=22, weight="bold"),
             ft.Row(menu_pop, alignment="center", wrap=True),
             ft.Divider(height=20),
-            ft.Text("Pytania popkultura + muzyka:", size=22, weight="bold"),
+            ft.Text(
+                "Pytania popkultura + muzyka:",
+                size=22,
+                weight="bold",
+            ),
             ft.Row(menu_music, alignment="center", wrap=True),
             ft.Divider(height=30),
             multiplayer_room,
@@ -375,7 +421,7 @@ async def main(page: ft.Page):
         visible=True,
     )
 
-    # ------------------- SINGLEPLAYER LOGIKA ------------------------
+    # ------------------- SINGLEPLAYER LOGIKA --------------------------
 
     def refresh_money():
         txt_money.value = f"Twoja kasa: {game['money']} zł"
@@ -414,6 +460,7 @@ async def main(page: ft.Page):
         btn_submit_answer.disabled = True
         for b in answers_column.controls:
             b.disabled = True
+
         dlg = ft.AlertDialog(
             modal=True,
             title=ft.Text("Koniec gry!"),
@@ -482,12 +529,14 @@ async def main(page: ft.Page):
             txt_feedback.color = "orange"
             page.update(txt_feedback)
             return
+
         cost = random.randint(500, 2500)
         if game["money"] < cost:
             txt_feedback.value = f"Nie stać Cię ({cost} zł)"
             txt_feedback.color = "orange"
             page.update(txt_feedback)
             return
+
         game["money"] -= cost
         game["spent"] += cost
         refresh_money()
@@ -498,6 +547,7 @@ async def main(page: ft.Page):
         wrong = [a for a in q["answers"] if a != correct]
         random.shuffle(wrong)
         to_disable = wrong[:2]
+
         for b in answers_column.controls:
             if b.data in to_disable:
                 b.disabled = True
@@ -518,6 +568,7 @@ async def main(page: ft.Page):
             txt_feedback.color = "orange"
             page.update(txt_feedback)
             return
+
         game["abcd_unlocked"] = True
         game["money"] -= cost
         game["spent"] += cost
@@ -550,10 +601,7 @@ async def main(page: ft.Page):
 
     def start_question(e):
         game["current_question_index"] += 1
-        if (
-            not game["questions"]
-            or game["current_question_index"] >= game["total"]
-        ):
+        if not game["questions"] or game["current_question_index"] >= game["total"]:
             if not game["questions"]:
                 show_game_over(
                     f"Błąd: Zestaw {game['set_name']} nie zawiera pytań "
@@ -712,30 +760,7 @@ async def main(page: ft.Page):
         page.update()
         start_bidding(None)
 
-    # ------------------- MULTIPLAYER LOGIKA ------------------------
-
-    async def mp_register(e):
-        name = (txt_mp_name.value or "").strip()
-        if not name:
-            txt_mp_status.value = "Podaj ksywkę, aby dołączyć."
-            txt_mp_status.color = "red"
-            page.update(txt_mp_status)
-            return
-            
-        raw = await resp.json()
-
-        # Konwersja JsProxy -> Python dict
-        try:
-            data = raw.to_py()
-        except:
-            data = raw
-
-        if not isinstance(data, dict) or "id" not in data:
-            print("MP REGISTER RAW RESPONSE:", data)
-            txt_mp_status.value = "Brak id gracza w odpowiedzi backendu"
-            txt_mp_status.color = "red"
-            page.update(txt_mp_status)
-            return    # ------------------- MULTIPLAYER LOGIKA ------------------------
+    # ------------------- MULTIPLAYER LOGIKA --------------------------
 
     async def mp_register(e):
         name = (txt_mp_name.value or "").strip()
@@ -750,24 +775,29 @@ async def main(page: ft.Page):
 
             resp = await fetch(
                 f"{BACKEND_URL}/register",
-                js.Object.fromEntries([
-                    ["method", "POST"],
-                    ["headers", js.Object.fromEntries([
-                        ["Content-Type", "application/json"]
-                    ])],
-                    ["body", payload]
-                ])
+                js.Object.fromEntries(
+                    [
+                        ["method", "POST"],
+                        [
+                            "headers",
+                            js.Object.fromEntries(
+                                [["Content-Type", "application/json"]]
+                            ),
+                        ],
+                        ["body", payload],
+                    ]
+                ),
             )
 
             raw = await resp.json()
-
             try:
                 data = raw.to_py()
-            except:
+            except Exception:
                 data = raw
 
             if not isinstance(data, dict) or "id" not in data:
-                txt_mp_status.value = "Brak ID gracza w odpowiedzi backendu."
+                print("MP REGISTER RAW RESPONSE:", data)
+                txt_mp_status.value = "Błąd: backend nie zwrócił ID gracza."
                 txt_mp_status.color = "red"
                 page.update(txt_mp_status)
                 return
@@ -777,7 +807,6 @@ async def main(page: ft.Page):
 
             txt_mp_status.value = f"Dołączono jako {mp_state['player_name']}."
             txt_mp_status.color = "green"
-
             btn_mp_bid.disabled = False
             btn_mp_allin.disabled = False
             btn_mp_chat_send.disabled = False
@@ -785,13 +814,13 @@ async def main(page: ft.Page):
 
         except Exception as ex:
             print("MP REGISTER ERROR:", ex)
-            txt_mp_status.value = "Błąd połączenia z serwerem multiplayer."
+            txt_mp_status.value = "Błąd połączenia z serwerem."
             txt_mp_status.color = "red"
             page.update(txt_mp_status)
 
     async def mp_bid(kind: str):
         if not mp_state["player_id"]:
-            txt_mp_status.value = "Najpierw dołącz do pokoju."
+            txt_mp_status.value = "Najpierw dołącz do pokoju!"
             txt_mp_status.color = "red"
             page.update(txt_mp_status)
             return
@@ -803,33 +832,47 @@ async def main(page: ft.Page):
 
             resp = await fetch(
                 f"{BACKEND_URL}/bid",
-                js.Object.fromEntries([
-                    ["method", "POST"],
-                    ["headers", js.Object.fromEntries([
-                        ["Content-Type", "application/json"]
-                    ])],
-                    ["body", payload]
-                ])
+                js.Object.fromEntries(
+                    [
+                        ["method", "POST"],
+                        [
+                            "headers",
+                            js.Object.fromEntries(
+                                [["Content-Type", "application/json"]]
+                            ),
+                        ],
+                        ["body", payload],
+                    ]
+                ),
             )
 
             raw = await resp.json()
-
             try:
                 data = raw.to_py()
-            except:
+            except Exception:
                 data = raw
 
-            pot_val = data.get("pot", 0) if isinstance(data, dict) else 0
+            pot_val = 0
+            if isinstance(data, dict):
+                pot_val = data.get("pot", 0)
 
-            txt_mp_status.value = f"Licytacja przyjęta. Pula: {pot_val} zł"
+            txt_mp_status.value = (
+                f"Licytacja OK → aktualna pula: {pot_val} zł"
+            )
             txt_mp_status.color = "blue"
             page.update(txt_mp_status)
 
         except Exception as ex:
             print("MP BID ERROR:", ex)
-            txt_mp_status.value = "Błąd połączenia z serwerem multiplayer."
+            txt_mp_status.value = "Błąd połączenia przy licytacji!"
             txt_mp_status.color = "red"
             page.update(txt_mp_status)
+
+    async def mp_bid_normal(e):
+        await mp_bid("normal")
+
+    async def mp_bid_allin(e):
+        await mp_bid("allin")
 
     async def mp_send_chat(e):
         msg = (txt_mp_chat.value or "").strip()
@@ -845,13 +888,18 @@ async def main(page: ft.Page):
 
             await fetch(
                 f"{BACKEND_URL}/chat",
-                js.Object.fromEntries([
-                    ["method", "POST"],
-                    ["headers", js.Object.fromEntries([
-                        ["Content-Type", "application/json"]
-                    ])],
-                    ["body", payload]
-                ])
+                js.Object.fromEntries(
+                    [
+                        ["method", "POST"],
+                        [
+                            "headers",
+                            js.Object.fromEntries(
+                                [["Content-Type", "application/json"]]
+                            ),
+                        ],
+                        ["body", payload],
+                    ]
+                ),
             )
 
             txt_mp_chat.value = ""
@@ -866,46 +914,47 @@ async def main(page: ft.Page):
             try:
                 resp = await fetch(
                     f"{BACKEND_URL}/state",
-                    js.Object.fromEntries([["method", "GET"]])
+                    js.Object.fromEntries([["method", "GET"]]),
                 )
 
-                raw_data = await resp.json()
+                raw = await resp.json()
                 try:
-                    data = raw_data.to_py()
-                except:
-                    data = raw_data
+                    data = raw.to_py()
+                except Exception:
+                    data = raw
 
                 if not isinstance(data, dict):
                     print("MP POLL ERROR – response nie jest dict:", data)
                     await asyncio.sleep(1.5)
                     continue
 
-                # TIMER
+                # TIMER + PULA (korzystamy z time_left, pot)
                 t = data.get("time_left", 0)
                 txt_mp_timer.value = f"Czas: {int(t)} s"
                 txt_mp_pot.value = f"Pula: {data.get('pot', 0)} zł"
 
-                # PLAYERS
+                # LISTA GRACZY
                 col_mp_players.controls.clear()
                 for p in data.get("players", []):
-                    name = p.get("name", "???")
+                    name = p.get("name", "?")
                     bid = p.get("bid", 0)
                     money = p.get("money", 0)
                     is_all_in = p.get("is_all_in", False)
 
-                    line = f"{name}: stawka {bid} zł, saldo {money} zł"
+                    text = f"{name}: stawka {bid} zł | saldo: {money} zł"
                     if is_all_in:
-                        line += " (VA BANQUE)"
+                        text += " (VA BANQUE)"
 
-                    col_mp_players.controls.append(ft.Text(line, size=14))
+                    col_mp_players.controls.append(ft.Text(text, size=14))
 
                 # CHAT
                 col_mp_chat.controls.clear()
                 for m in data.get("chat", []):
-                    player = m.get("player", "???")
-                    msg = m.get("message", "")
                     col_mp_chat.controls.append(
-                        ft.Text(f"{player}: {msg}", size=13)
+                        ft.Text(
+                            f"{m.get('player', '?')}: {m.get('message', '')}",
+                            size=13,
+                        )
                     )
 
                 page.update()
@@ -914,8 +963,6 @@ async def main(page: ft.Page):
                 print("MP POLL ERROR:", ex)
 
             await asyncio.sleep(1.5)
-
-
 
     # ------------------- HANDLERS PRZYCISKÓW ------------------------
 
@@ -936,7 +983,8 @@ async def main(page: ft.Page):
 
     page.add(main_menu, game_view)
     page.update()
-    # UWAGA: przekazujemy funkcję, nie wywołanie
+
+    # Start stałego odpytywania stanu pokoju (multiplayer)
     page.run_task(mp_poll_state)
 
 
