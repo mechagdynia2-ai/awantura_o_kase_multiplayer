@@ -40,12 +40,13 @@ async def fetch_text(url: str) -> str:
 
 async def fetch_json(url: str, method: str = "GET", body: dict | None = None):
     try:
-        kwargs = {}
-        if method != "GET":
+        if method.upper() == "GET":
+            kwargs = js.Object.fromEntries([["method", "GET"]])
+        else:
             payload = json.dumps(body or {})
             kwargs = js.Object.fromEntries(
                 [
-                    ["method", method],
+                    ["method", method.upper()],
                     [
                         "headers",
                         js.Object.fromEntries(
@@ -55,9 +56,6 @@ async def fetch_json(url: str, method: str = "GET", body: dict | None = None):
                     ["body", payload],
                 ]
             )
-        else:
-            kwargs = js.Object.fromEntries([["method", "GET"]])
-
         resp = await fetch(url, kwargs)
         raw = await resp.json()
         try:
@@ -181,20 +179,19 @@ async def main(page: ft.Page):
         "is_admin": False,
         "is_observer": False,
         "joined": False,
-        "known_players": set(),  # do wykrywania, kto zniknął
     }
 
     # mapowanie nazwa -> kolor (ciemne odcienie)
     name_color_cache: dict[str, str] = {}
     color_palette = [
-        "blueGrey900",
-        "indigo900",
-        "deepPurple900",
-        "blue900",
-        "teal900",
-        "green900",
-        "brown800",
-        "grey900",
+        "#1e3a8a",  # dark blue
+        "#4c1d95",  # dark purple
+        "#064e3b",  # dark green
+        "#7c2d12",  # dark brown
+        "#111827",  # almost black
+        "#075985",  # dark cyan
+        "#7f1d1d",  # dark red
+        "#374151",  # dark grey
     ]
 
     def name_to_color(name: str) -> str:
@@ -244,7 +241,7 @@ async def main(page: ft.Page):
         size=18,
         weight=ft.FontWeight.BOLD,
         text_align=ft.TextAlign.CENTER,
-        color="blueGrey900",
+        color="#0f172a",  # dark navy
     )
 
     txt_feedback = ft.Text(
@@ -253,7 +250,7 @@ async def main(page: ft.Page):
         text_align=ft.TextAlign.CENTER,
     )
 
-    # okienko czatu (multiplayer) – używamy też w layout single/multi, ale działa tylko w multi
+    # okienko czatu (multiplayer)
     col_mp_chat = ft.Column(
         [],
         spacing=2,
@@ -291,7 +288,7 @@ async def main(page: ft.Page):
         ),
         padding=8,
         border_radius=10,
-        border=ft.border.all(1, "grey300"),
+        border=ft.border.all(1, "#e0e0e0"),
         bgcolor="white",
     )
 
@@ -364,7 +361,7 @@ async def main(page: ft.Page):
         weight=ft.FontWeight.BOLD,
     )
     txt_mp_info = ft.Text(
-        "Po dołączeniu admin wybiera zestaw pytań i startuje wspólną licytację.\n"
+        "Po dołączeniu ADMIN wybiera zestaw pytań i startuje wspólną licytację.\n"
         "Licytacja: +100 zł, „Kończę licytację”, VA BANQUE!",
         size=12,
         color="grey_700",
@@ -416,7 +413,6 @@ async def main(page: ft.Page):
 
     main_feedback = ft.Text("", color="red", visible=False)
 
-    # przyciski wyboru trybu
     btn_mode_single = ft.FilledButton(
         "Tryb SINGLEPLAYER",
         width=220,
@@ -432,13 +428,63 @@ async def main(page: ft.Page):
         spacing=20,
     )
 
-    # kafelki zestawów – używane w single i w multi (admin)
+    # kafelki zestawów – single / admin multi
+    async def start_game_session_single(filename: str):
+        print(f"[LOAD SINGLE] Pobieram zestaw: {filename}")
+        questions = await parse_question_file(page, filename)
+        game["questions"] = questions
+        game["total"] = len(questions)
+        game["set_name"] = filename.replace(".txt", "")
+        reset_game()
+        main_menu.visible = False
+        game_view.visible = True
+        multiplayer_view.visible = False
+        main_feedback.visible = False
+        single_set_selector.visible = False
+        page.update()
+        start_bidding_single()
+
+    async def mp_select_question_set(filename: str):
+        if not mp_state["is_admin"]:
+            txt_mp_status.value = "Tylko ADMIN może wybierać zestaw."
+            txt_mp_status.color = "red"
+            txt_mp_status.update()
+            return
+
+        await fetch_json(
+            f"{BACKEND_URL}/chat",
+            "POST",
+            {
+                "player": "BOT",
+                "message": f"Zestaw pytań nr: {filename.replace('.txt', '')} został wybrany.",
+            },
+        )
+        await fetch_json(
+            f"{BACKEND_URL}/chat",
+            "POST",
+            {
+                "player": "BOT",
+                "message": "Gra rozpocznie się – odliczanie na czacie (20 s).",
+            },
+        )
+
+        questions = await parse_question_file(page, filename)
+        game["questions"] = questions
+        game["total"] = len(questions)
+        game["set_name"] = filename.replace(".txt", "")
+
+        main_menu.visible = False
+        multiplayer_view.visible = True
+        game_view.visible = True
+        page.update()
+
+        await fetch_json(f"{BACKEND_URL}/next_round", "POST", {})
+
     def menu_tile(i: int, color: str, for_multiplayer: bool = False):
         filename = f"{i:02d}.txt"
 
         async def click(e):
             if for_multiplayer:
-                # w multi – admin wybiera zestaw pytań dla wszystkich
                 await mp_select_question_set(filename)
             else:
                 await start_game_session_single(filename)
@@ -463,7 +509,6 @@ async def main(page: ft.Page):
     menu_pop = [menu_tile(i, "deep_purple_50") for i in range(31, 41)]
     menu_music = [menu_tile(i, "amber_50") for i in range(41, 51)]
 
-    # dla multiplayer – osobne kafelki (żeby móc je łatwo ukrywać)
     mp_menu_standard = [
         menu_tile(i, "blue_grey_100", for_multiplayer=True)
         for i in range(1, 31)
@@ -479,15 +524,23 @@ async def main(page: ft.Page):
 
     single_set_selector = ft.Column(
         [
-            ft.Text("Wybierz zestaw pytań (singleplayer):", size=16, weight="bold"),
+            ft.Text(
+                "Wybierz zestaw pytań (singleplayer):",
+                size=16,
+                weight=ft.FontWeight.BOLD,
+            ),
             ft.Row(menu_standard[:10], alignment="center", wrap=True),
             ft.Row(menu_standard[10:20], alignment="center", wrap=True),
             ft.Row(menu_standard[20:30], alignment="center", wrap=True),
             ft.Divider(height=10),
-            ft.Text("Popkultura:", size=15, weight="bold"),
+            ft.Text("Popkultura:", size=15, weight=ft.FontWeight.BOLD),
             ft.Row(menu_pop, alignment="center", wrap=True),
             ft.Divider(height=10),
-            ft.Text("Popkultura + muzyka:", size=15, weight="bold"),
+            ft.Text(
+                "Popkultura + muzyka:",
+                size=15,
+                weight=ft.FontWeight.BOLD,
+            ),
             ft.Row(menu_music, alignment="center", wrap=True),
         ],
         spacing=8,
@@ -499,24 +552,28 @@ async def main(page: ft.Page):
             ft.Text(
                 "ADMIN: wybierz zestaw pytań (multiplayer):",
                 size=14,
-                weight="bold",
+                weight=ft.FontWeight.BOLD,
                 color="red",
             ),
             ft.Row(mp_menu_standard[:10], alignment="center", wrap=True),
             ft.Row(mp_menu_standard[10:20], alignment="center", wrap=True),
             ft.Row(mp_menu_standard[20:30], alignment="center", wrap=True),
             ft.Divider(height=8),
-            ft.Text("Popkultura:", size=13, weight="bold"),
+            ft.Text("Popkultura:", size=13, weight=ft.FontWeight.BOLD),
             ft.Row(mp_menu_pop, alignment="center", wrap=True),
             ft.Divider(height=8),
-            ft.Text("Popkultura + muzyka:", size=13, weight="bold"),
+            ft.Text(
+                "Popkultura + muzyka:",
+                size=13,
+                weight=ft.FontWeight.BOLD,
+            ),
             ft.Row(mp_menu_music, alignment="center", wrap=True),
         ],
         spacing=6,
         visible=False,
     )
 
-    # widok gry (wspólny layout, single/multi)
+    # widok gry
     game_view = ft.Column(
         [
             ft.Container(
@@ -539,7 +596,9 @@ async def main(page: ft.Page):
             ft.Container(
                 txt_question,
                 alignment=ft.alignment.center,
-                padding=ft.padding.only(left=16, right=16, top=10, bottom=4),
+                padding=ft.padding.only(
+                    left=16, right=16, top=10, bottom=4
+                ),
             ),
             answer_box,
             ft.Container(
@@ -586,7 +645,7 @@ async def main(page: ft.Page):
     multiplayer_view = ft.Column(
         [
             mp_header,
-            game_view,  # ten sam game_view – ale używany z logiką multi
+            game_view,
         ],
         visible=False,
         spacing=8,
@@ -594,7 +653,7 @@ async def main(page: ft.Page):
 
     main_menu = ft.Column(
         [
-            ft.Text("AWANTURA O KASĘ", size=26, weight="bold"),
+            ft.Text("AWANTURA O KASĘ", size=26, weight=ft.FontWeight.BOLD),
             ft.Text(
                 "Wersja: Singleplayer + Multiplayer (beta)",
                 size=14,
@@ -808,7 +867,9 @@ async def main(page: ft.Page):
 
     def start_question(e):
         game["current_question_index"] += 1
-        if not game["questions"] or game["current_question_index"] >= game["total"]:
+        if not game["questions"] or game["current_question_index"] >= game[
+            "total"
+        ]:
             if not game["questions"]:
                 show_game_over(
                     f"Błąd: Zestaw {game['set_name']} nie zawiera pytań "
@@ -845,7 +906,7 @@ async def main(page: ft.Page):
         txt_feedback.color = "black"
         page.update()
 
-        page.run_task(answer_timeout())
+        page.run_task(answer_timeout)
 
     def start_bidding_single():
         stake = game["base_stake"]
@@ -909,21 +970,6 @@ async def main(page: ft.Page):
             page.dialog.open = False
         page.update()
 
-    async def start_game_session_single(filename: str):
-        print(f"[LOAD SINGLE] Pobieram zestaw: {filename}")
-        questions = await parse_question_file(page, filename)
-        game["questions"] = questions
-        game["total"] = len(questions)
-        game["set_name"] = filename.replace(".txt", "")
-        reset_game()
-        main_menu.visible = False
-        game_view.visible = True
-        multiplayer_view.visible = False
-        main_feedback.visible = False
-        single_set_selector.visible = False
-        page.update()
-        start_bidding_single()
-
     # -------------------- FUNKCJE MULTIPLAYER --------------------
 
     def render_chat_from_state(chat_list: list[dict], players_state: list[dict]):
@@ -940,14 +986,15 @@ async def main(page: ft.Page):
                 spans.append(
                     ft.TextSpan(
                         "BOT: ",
-                        ft.TextStyle(
+                        style=ft.TextStyle(
                             color="black", weight=ft.FontWeight.BOLD, size=12
                         ),
                     )
                 )
                 spans.append(
                     ft.TextSpan(
-                        msg_text, ft.TextStyle(color="black", size=12)
+                        msg_text,
+                        style=ft.TextStyle(color="black", size=12),
                     )
                 )
             else:
@@ -956,8 +1003,10 @@ async def main(page: ft.Page):
                     spans.append(
                         ft.TextSpan(
                             "[ADMIN] ",
-                            ft.TextStyle(
-                                color="red", weight=ft.FontWeight.BOLD, size=12
+                            style=ft.TextStyle(
+                                color="red",
+                                weight=ft.FontWeight.BOLD,
+                                size=12,
                             ),
                         )
                     )
@@ -965,7 +1014,7 @@ async def main(page: ft.Page):
                 spans.append(
                     ft.TextSpan(
                         f"{player_name}: ",
-                        ft.TextStyle(
+                        style=ft.TextStyle(
                             color=name_color,
                             weight=ft.FontWeight.BOLD,
                             size=12,
@@ -974,12 +1023,17 @@ async def main(page: ft.Page):
                 )
                 spans.append(
                     ft.TextSpan(
-                        msg_text, ft.TextStyle(color="black", size=12)
+                        msg_text,
+                        style=ft.TextStyle(color="black", size=12),
                     )
                 )
 
             col_mp_chat.controls.append(
-                ft.RichText(spans=spans, max_lines=2, overflow="ellipsis")
+                ft.RichText(
+                    spans=spans,
+                    max_lines=2,
+                    overflow=ft.TextOverflow.ELLIPSIS,
+                )
             )
 
         col_mp_chat.update()
@@ -992,7 +1046,9 @@ async def main(page: ft.Page):
             txt_mp_status.update()
             return
 
-        data = await fetch_json(f"{BACKEND_URL}/register", "POST", {"name": name})
+        data = await fetch_json(
+            f"{BACKEND_URL}/register", "POST", {"name": name}
+        )
         if not data or "id" not in data:
             txt_mp_status.value = "Błąd rejestracji."
             txt_mp_status.color = "red"
@@ -1016,15 +1072,13 @@ async def main(page: ft.Page):
         btn_mp_finish.disabled = False
         btn_mp_allin.disabled = False
 
-        # admin widzi wybór zestawów
         if mp_state["is_admin"]:
             mp_set_selector.visible = True
 
         page.update()
 
-        # start heartbeat & polling
-        page.run_task(mp_heartbeat_loop())
-        page.run_task(mp_poll_state())
+        page.run_task(mp_heartbeat_loop)
+        page.run_task(mp_poll_state)
 
     async def mp_heartbeat_loop():
         while mp_state["player_id"]:
@@ -1107,45 +1161,6 @@ async def main(page: ft.Page):
             txt_mp_status.color = "blue"
         txt_mp_status.update()
 
-    async def mp_select_question_set(filename: str):
-        if not mp_state["is_admin"]:
-            txt_mp_status.value = "Tylko ADMIN może wybierać zestaw."
-            txt_mp_status.color = "red"
-            txt_mp_status.update()
-            return
-
-        await fetch_json(
-            f"{BACKEND_URL}/chat",
-            "POST",
-            {
-                "player": "BOT",
-                "message": f"Zestaw pytań nr: {filename.replace('.txt', '')} został wybrany.",
-            },
-        )
-        await fetch_json(
-            f"{BACKEND_URL}/chat",
-            "POST",
-            {
-                "player": "BOT",
-                "message": "Gra rozpocznie się – odliczanie na czacie (20 s).",
-            },
-        )
-
-        # załadowanie pytań lokalnie – admin ma je u siebie
-        questions = await parse_question_file(page, filename)
-        game["questions"] = questions
-        game["total"] = len(questions)
-        game["set_name"] = filename.replace(".txt", "")
-
-        # Tryb gry – pokazujemy game_view
-        main_menu.visible = False
-        multiplayer_view.visible = True
-        game_view.visible = True
-        page.update()
-
-        # start nowej rundy na backendzie
-        await fetch_json(f"{BACKEND_URL}/next_round", "POST", {})
-
     async def mp_poll_state():
         while True:
             data = await fetch_json(f"{BACKEND_URL}/state", "GET")
@@ -1153,7 +1168,6 @@ async def main(page: ft.Page):
                 await asyncio.sleep(1.5)
                 continue
 
-            # aktualizacja puli, timera
             t_left = int(data.get("time_left", 0))
             txt_mp_timer.value = f"Czas: {t_left} s"
             txt_mp_pot.value = f"Pula (multiplayer): {data.get('pot', 0)} zł"
@@ -1161,34 +1175,8 @@ async def main(page: ft.Page):
             players_list = data.get("players", [])
             chat_list = data.get("chat", [])
 
-            # wykrywanie znikniętych graczy – tylko admin wysyła info na czat
-            new_ids = {p["id"] for p in players_list}
-            old_ids = mp_state["known_players"]
-            if mp_state["is_admin"]:
-                gone = old_ids - new_ids
-                gone_names = [
-                    p["name"]
-                    for p in players_list + []
-                    if p["id"] in gone
-                ]
-                # powyższa lista będzie zwykle pusta (bo zniknęli),
-                # więc prostsze mapowanie:
-                id_to_name = {p["id"]: p["name"] for p in players_list}
-                for gid in gone:
-                    name = id_to_name.get(gid, "Gracz")
-                    await fetch_json(
-                        f"{BACKEND_URL}/chat",
-                        "POST",
-                        {
-                            "player": "BOT",
-                            "message": f"{name} opuścił grę.",
-                        },
-                    )
-            mp_state["known_players"] = new_ids
-
             render_chat_from_state(chat_list, players_list)
 
-            # jeżeli jesteśmy już w multi, pokaż game_view
             if mp_state["joined"]:
                 multiplayer_view.visible = True
                 game_view.visible = True
@@ -1198,14 +1186,12 @@ async def main(page: ft.Page):
 
     # -------------------- HANDLERY PRZYCISKÓW --------------------
 
-    # single
     btn_submit_answer.on_click = submit_answer
     btn_5050.on_click = hint_5050
     btn_buy_abcd.on_click = buy_abcd
     btn_next.on_click = start_question
     btn_back.on_click = back_to_menu
 
-    # wybór trybu
     def mode_single_click(e):
         main_menu.visible = True
         single_set_selector.visible = True
@@ -1219,13 +1205,11 @@ async def main(page: ft.Page):
         multiplayer_view.visible = True
         game_view.visible = True
         page.update()
-        # start pollera – reszta ruszy po joinie
-        page.run_task(mp_poll_state())
+        page.run_task(mp_poll_state)
 
     btn_mode_single.on_click = mode_single_click
     btn_mode_multi.on_click = mode_multi_click
 
-    # multiplayer
     btn_mp_join.on_click = make_async_click(mp_register)
     btn_mp_chat_send.on_click = make_async_click(mp_send_chat)
     btn_mp_bid.on_click = make_async_click(mp_bid_normal)
