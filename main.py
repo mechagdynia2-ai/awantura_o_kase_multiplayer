@@ -155,8 +155,6 @@ async def main(page: ft.Page):
     mp_last_seen: dict[str, float] = {}
     mp_display_pot = 0
 
-
-
     # --- SINGLEPLAYER UI -------------------------------------------------
     txt_money = ft.Text(
         f"Twoja kasa: {game['money']} zł",
@@ -289,8 +287,6 @@ async def main(page: ft.Page):
     )
 
     main_feedback = ft.Text("", color="red", visible=False)
-
-    
 
     def menu_tile(i, color):
         filename = f"{i:02d}.txt"
@@ -722,7 +718,6 @@ async def main(page: ft.Page):
         txt_feedback.color = "black"
         page.update()
 
-
     def bid_100(e):
         if game["bid"] >= game["max_bid"]:
             txt_feedback.value = (
@@ -765,7 +760,6 @@ async def main(page: ft.Page):
             btn_bid.disabled = True
         page.update()
 
-
     def start_bidding(e):
         if not game["questions"]:
             show_game_over(
@@ -807,7 +801,6 @@ async def main(page: ft.Page):
         btn_show_question.disabled = False
         page.update()
 
-
     def reset_game():
         game["money"] = 10000
         game["current_question_index"] = -1
@@ -830,14 +823,13 @@ async def main(page: ft.Page):
         refresh_bonus()
         page.update()
 
-
     def back_to_menu(e=None):
+        # w tym układzie wróć do wyboru zestawu
         singleplayer_menu.visible = True
         game_view.visible = False
         if page.dialog:
             page.dialog.open = False
         page.update()
-
 
     async def start_game_session(e, filename: str):
         print(f"[LOAD] Pobieram zestaw: {filename}")
@@ -851,3 +843,324 @@ async def main(page: ft.Page):
         main_feedback.visible = False
         page.update()
         start_bidding(None)
+
+    # ------------------- MULTIPLAYER LOGIKA ------------------------
+    async def mp_register(e):
+        name = (txt_mp_name.value or "").strip()
+        if not name:
+            txt_mp_status.value = "Podaj ksywkę, aby dołączyć."
+            txt_mp_status.color = "red"
+            page.update(txt_mp_status)
+            return
+        try:
+            payload = __import__("json").dumps({"name": name})
+
+            resp = await fetch(
+                f"{BACKEND_URL}/register",
+                js.Object.fromEntries(
+                    [
+                        ["method", "POST"],
+                        [
+                            "headers",
+                            js.Object.fromEntries(
+                                [["Content-Type", "application/json"]],
+                            ),
+                        ],
+                        ["body", payload],
+                    ]
+                ),
+            )
+
+            raw = await resp.json()
+            try:
+                data = raw.to_py()
+            except Exception:  # noqa: BLE001
+                data = raw
+
+            if not isinstance(data, dict) or "id" not in data:
+                txt_mp_status.value = "Błąd: backend nie zwrócił ID gracza."
+                txt_mp_status.color = "red"
+                page.update(txt_mp_status)
+                return
+
+            mp_state["player_id"] = data["id"]
+            mp_state["player_name"] = data.get("name", name)
+
+            txt_mp_status.value = f"Dołączono jako {mp_state['player_name']}."
+            txt_mp_status.color = "green"
+            btn_mp_bid.disabled = False
+            btn_mp_allin.disabled = False
+            btn_mp_chat_send.disabled = False
+            page.update()
+
+        except Exception as ex:  # noqa: BLE001
+            print("MP REGISTER ERROR:", ex)
+            txt_mp_status.value = "Błąd połączenia z serwerem."
+            txt_mp_status.color = "red"
+            page.update(txt_mp_status)
+
+    async def mp_bid(kind: str):
+        if not mp_state["player_id"]:
+            txt_mp_status.value = "Najpierw dołącz do pokoju!"
+            txt_mp_status.color = "red"
+            page.update(txt_mp_status)
+            return
+
+        try:
+            payload = __import__("json").dumps(
+                {"player_id": mp_state["player_id"], "kind": kind},
+            )
+
+            resp = await fetch(
+                f"{BACKEND_URL}/bid",
+                js.Object.fromEntries(
+                    [
+                        ["method", "POST"],
+                        [
+                            "headers",
+                            js.Object.fromEntries(
+                                [["Content-Type", "application/json"]],
+                            ),
+                        ],
+                        ["body", payload],
+                    ]
+                ),
+            )
+
+            status = getattr(resp, "status", None)
+            if status and status >= 400:
+                raw_err = await resp.json()
+                try:
+                    err = raw_err.to_py()
+                except Exception:  # noqa: BLE001
+                    err = raw_err
+                detail = (
+                    err.get("detail", "Błąd licytacji.")
+                    if isinstance(err, dict)
+                    else "Błąd licytacji."
+                )
+                txt_mp_status.value = detail
+                txt_mp_status.color = "red"
+                page.update(txt_mp_status)
+                return
+
+            raw = await resp.json()
+            try:
+                data = raw.to_py()
+            except Exception:  # noqa: BLE001
+                data = raw
+
+            pot_val = 0
+            if isinstance(data, dict):
+                pot_val = data.get("pot", 0)
+
+            txt_mp_status.value = f"Licytacja OK → aktualna pula: {pot_val} zł"
+            txt_mp_status.color = "blue"
+            page.update(txt_mp_status)
+
+        except Exception as ex:  # noqa: BLE001
+            print("MP BID ERROR:", ex)
+            txt_mp_status.value = "Błąd połączenia przy licytacji!"
+            txt_mp_status.color = "red"
+            page.update(txt_mp_status)
+
+    async def mp_bid_normal(e):
+        await mp_bid("normal")
+
+    async def mp_bid_allin(e):
+        await mp_bid("allin")
+
+    async def mp_send_chat(e):
+        msg = (txt_mp_chat.value or "").strip()
+        if not msg:
+            return
+
+        name = mp_state["player_name"] or "Anonim"
+
+        try:
+            payload = __import__("json").dumps(
+                {"player": name, "message": msg},
+            )
+
+            await fetch(
+                f"{BACKEND_URL}/chat",
+                js.Object.fromEntries(
+                    [
+                        ["method", "POST"],
+                        [
+                            "headers",
+                            js.Object.fromEntries(
+                                [["Content-Type", "application/json"]],
+                            ),
+                        ],
+                        ["body", payload],
+                    ]
+                ),
+            )
+
+            txt_mp_chat.value = ""
+            page.update(txt_mp_chat)
+
+        except Exception as ex:  # noqa: BLE001
+            print("MP CHAT ERROR:", ex)
+
+    async def mp_next_round(e=None):
+        try:
+            resp = await fetch(
+                f"{BACKEND_URL}/next_round",
+                js.Object.fromEntries(
+                    [
+                        ["method", "POST"],
+                    ]
+                ),
+            )
+            _ = await resp.json()
+            txt_mp_status.value = "Nowa runda wystartowała."
+            txt_mp_status.color = "green"
+            txt_mp_winner.value = ""
+            page.update(txt_mp_status, txt_mp_winner)
+        except Exception as ex:  # noqa: BLE001
+            print("MP NEXT ROUND ERROR:", ex)
+            txt_mp_status.value = "Błąd przy starcie nowej rundy."
+            txt_mp_status.color = "red"
+            page.update(txt_mp_status)
+
+    btn_mp_next_round.on_click = make_async_click(mp_next_round)
+
+    async def mp_poll_state():
+        nonlocal mp_display_pot
+        await asyncio.sleep(1)
+        while True:
+            try:
+                resp = await fetch(
+                    f"{BACKEND_URL}/state",
+                    js.Object.fromEntries([["method", "GET"]]),
+                )
+
+                raw = await resp.json()
+                try:
+                    data = raw.to_py()
+                except Exception:  # noqa: BLE001
+                    data = raw
+
+                if not isinstance(data, dict):
+                    print("MP POLL ERROR – response nie jest dict:", data)
+                    await asyncio.sleep(1.5)
+                    continue
+
+                phase = data.get("phase", "bidding")
+                pot = data.get("pot", 0)
+                time_left = data.get("time_left", 0)
+                answering_id = data.get("answering_player_id")
+
+                # TIMER & FAZA
+                txt_mp_timer.value = f"Czas: {int(time_left)} s"
+                txt_mp_phase.value = (
+                    "Faza: licytacja" if phase == "bidding" else "Faza: odpowiedź"
+                )
+
+                # płynna animacja puli
+                step = max(1, abs(pot - mp_display_pot) // 10)
+                if mp_display_pot < pot:
+                    mp_display_pot = min(mp_display_pot + step, pot)
+                elif mp_display_pot > pot:
+                    mp_display_pot = max(mp_display_pot - step, pot)
+                txt_mp_pot.value = f"Pula: {mp_display_pot} zł"
+
+                # gracze (z filtrem AFK 30 s – po stronie UI)
+                col_mp_players.controls.clear()
+                now_ts = time.time()
+                for p in data.get("players", []):
+                    pid = p.get("id")
+                    name = p.get("name", "?")
+                    bid = p.get("bid", 0)
+                    money = p.get("money", 0)
+                    is_all_in = p.get("is_all_in", False)
+
+                    if pid:
+                        mp_last_seen[pid] = now_ts
+
+                    # ukryj z UI, jeśli nieaktualny > 30 s
+                    if pid and now_ts - mp_last_seen.get(pid, now_ts) > 30:
+                        continue
+
+                    line = f"{name}: stawka {bid} zł, saldo {money} zł"
+                    if is_all_in:
+                        line += " (VA BANQUE)"
+
+                    color = color_for_name(name)
+                    col_mp_players.controls.append(
+                        ft.Text(
+                            line,
+                            size=14,
+                            color=color,
+                            weight=ft.FontWeight.BOLD,
+                        )
+                    )
+
+                # zwycięzca rundy
+                if phase == "answering" and answering_id:
+                    winner_name = None
+                    for p in data.get("players", []):
+                        if p.get("id") == answering_id:
+                            winner_name = p.get("name")
+                            break
+                    if winner_name:
+                        txt_mp_winner.value = (
+                            f"Zwycięzca rundy: {winner_name} (pula {pot} zł)"
+                        )
+                    else:
+                        txt_mp_winner.value = "Runda zakończona – brak zwycięzcy."
+                    btn_mp_next_round.disabled = False
+                else:
+                    txt_mp_winner.value = ""
+                    btn_mp_next_round.disabled = True
+
+                # czat
+                col_mp_chat.controls.clear()
+                for m in data.get("chat", []):
+                    player = m.get("player", "?")
+                    msg = m.get("message", "")
+                    col_mp_chat.controls.append(
+                        ft.Text(
+                            f"{player}: {msg}",
+                            size=13,
+                        )
+                    )
+
+                page.update()
+
+            except Exception as ex:  # noqa: BLE001
+                print("MP POLL ERROR:", ex)
+
+            await asyncio.sleep(1.5)
+
+    # ------------------- HANDLERS PRZYCISKÓW ------------------------
+    btn_submit_answer.on_click = submit_answer
+    btn_5050.on_click = hint_5050
+    btn_buy_abcd.on_click = buy_abcd
+    btn_show_question.on_click = start_question
+    btn_bid.on_click = bid_100
+    btn_next.on_click = start_bidding
+    btn_back.on_click = back_to_menu
+
+    btn_mp_join.on_click = make_async_click(mp_register)
+    btn_mp_bid.on_click = make_async_click(mp_bid_normal)
+    btn_mp_allin.on_click = make_async_click(mp_bid_allin)
+    btn_mp_chat_send.on_click = make_async_click(mp_send_chat)
+
+    # ------------------- START STRONY ------------------------
+    page.add(root)
+    page.update()
+    page.run_task(mp_poll_state)
+
+
+if __name__ == "__main__":
+    try:
+        ft.app(target=main)
+    finally:
+        try:
+            loop = asyncio.get_event_loop()
+            loop.close()
+        except Exception:
+            pass
