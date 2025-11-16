@@ -1,849 +1,461 @@
-import flet as ft
-import random
-import re
-import js
-from js import fetch
-from thefuzz import fuzz
-import warnings
-import asyncio
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import List, Dict, Optional
 import time
+import uuid
 
-warnings.filterwarnings("ignore")
+app = FastAPI(title="Awantura o Kasę – Multiplayer Backend")
 
-BACKEND_URL = "https://game-multiplayer-qfn1.onrender.com"
-GITHUB_RAW_BASE_URL = "https://raw.githubusercontent.com/mechagdynia2-ai/game/main/assets/"
+# --- CORS -----------------------------------------------------------------
 
+origins = [
+    "https://mechagdynia2-ai.github.io",
+    "https://mechagdynia2-ai.github.io/awantura_o_kase_multiplayer",
+]
 
-def make_async_click(async_callback):
-    def handler(e):
-        async def task():
-            await async_callback(e)
-        e.page.run_task(task)
-    return handler
-
-
-async def fetch_text(url: str) -> str:
-    try:
-        response = await fetch(url)
-        return await response.text()
-    except Exception as e:  # noqa: BLE001
-        print("[FETCH ERROR]", e)
-        return ""
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
-async def parse_question_file(page: ft.Page, filename: str) -> list:
-    url = f"{GITHUB_RAW_BASE_URL}{filename}"
-    print(f"[FETCH] Pobieram: {url}")
-    content = await fetch_text(url)
-    if not content:
-        print(f"[FETCH ERROR] {filename}: brak danych")
-        return []
-
-    parsed = []
-    blocks = re.split(r"\n(?=\d{1,3}\.)", content)
-    for block in blocks:
-        block = block.strip()
-        if not block:
-            continue
-
-        q_match = re.match(r"^\d{1,3}\.\s*(.+)", block)
-        if not q_match:
-            print("[WARNING] Nie znaleziono pytania:", block[:50])
-            continue
-        question = q_match.group(1).strip()
-
-        correct_match = re.search(
-            r"prawidłowa\s+odpowied[zź]\s*=\s*(.+)",
-            block,
-            re.IGNORECASE,
-        )
-        if not correct_match:
-            print("[WARNING] Brak prawidłowej odpowiedzi:", block[:50])
-            continue
-        correct = correct_match.group(1).strip()
-
-        answers_match = re.search(
-            r"odpowied[zź]\s*abcd\s*=\s*A\s*=\s*(.+?),\s*B\s*=\s*(.+?),\s*C\s*=\s*(.+?),\s*D\s*=\s*(.+)",
-            block,
-            re.IGNORECASE,
-        )
-        if not answers_match:
-            print("[WARNING] Brak ABCD:", block[:50])
-            continue
-
-        a = answers_match.group(1).strip()
-        b = answers_match.group(2).strip()
-        c = answers_match.group(3).strip()
-        d = answers_match.group(4).strip()
-
-        parsed.append(
-            {
-                "question": question,
-                "correct": correct,
-                "answers": [a, b, c, d],
-            }
-        )
-
-    return parsed
+# --- MODELE DANYCH --------------------------------------------------------
 
 
-def normalize_answer(text: str) -> str:
-    text = str(text).lower().strip()
-    repl = {
-        "ó": "o",
-        "ł": "l",
-        "ż": "z",
-        "ź": "z",
-        "ć": "c",
-        "ń": "n",
-        "ś": "s",
-        "ą": "a",
-        "ę": "e",
-        "ü": "u",
-    }
-    for c, r in repl.items():
-        text = text.replace(c, r)
-    text = text.replace("u", "o")
-    return "".join(text.split())
+class Player(BaseModel):
+    id: str
+    name: str
+    money: int = 10000
+    is_admin: bool = False
+    last_seen: float = 0.0  # timestamp ostatniego heartbeat/state
 
 
-def color_for_name(name: str) -> str:
-    """Deterministycznie dobiera kolor dla nicka."""
-    palette = [
-        "red",
-        "blue",
-        "green",
-        "purple",
-        "orange",
-        "teal",
-        "pink",
-        "indigo",
-        "cyan",
-        "amber",
-    ]
-    if not name:
-        return "black"
-    idx = sum(ord(ch) for ch in name) % len(palette)
-    return palette[idx]
+class PlayerState(BaseModel):
+    id: str
+    name: str
+    money: int
+    bid: int
+    is_all_in: bool
+    is_admin: bool
 
 
-async def main(page: ft.Page):
-    page.title = "Awantura o Kasę – Singleplayer + Multiplayer (beta)"
-    page.scroll = ft.ScrollMode.AUTO
-    page.theme_mode = ft.ThemeMode.LIGHT
-    page.vertical_alignment = ft.MainAxisAlignment.START
+class BidInfo(BaseModel):
+    player_id: str
+    amount: int
+    is_all_in: bool
+    ts: float  # kiedy złożono ostatnią ofertę
 
-    game = {
-        "money": 10000,
-        "current_question_index": -1,
-        "base_stake": 500,
-        "abcd_unlocked": False,
-        "main_pot": 0,
-        "spent": 0,
-        "bid": 0,
-        "bonus": 0,
-        "max_bid": 5000,
-        "questions": [],
-        "total": 0,
-        "set_name": "",
-    }
 
-    mp_state = {
-        "player_id": None,
-        "player_name": "",
-    }
-    mp_last_seen: dict[str, float] = {}
-    mp_display_pot = 0
+class ChatMessage(BaseModel):
+    player: str
+    message: str
+    timestamp: float
 
-    # --- SINGLEPLAYER UI -------------------------------------------------
-    txt_money = ft.Text(
-        f"Twoja kasa: {game['money']} zł",
-        size=16,
-        weight=ft.FontWeight.BOLD,
-        color="green_600",
-    )
-    txt_spent = ft.Text(
-        "Wydano: 0 zł",
-        size=14,
-        color="grey_700",
-        text_align=ft.TextAlign.RIGHT,
-    )
-    txt_counter = ft.Text(
-        "Pytanie 0 / 0 (Zestaw 00)",
-        size=16,
-        color="grey_700",
-        text_align=ft.TextAlign.CENTER,
-    )
-    txt_pot = ft.Text(
-        "AKTUALNA PULA: 0 zł",
-        size=22,
-        weight=ft.FontWeight.BOLD,
-        color="purple_600",
-        text_align=ft.TextAlign.CENTER,
-    )
-    txt_bonus = ft.Text(
-        "Bonus od banku: 0 zł",
-        size=16,
-        color="blue_600",
-        text_align=ft.TextAlign.CENTER,
-        visible=False,
-    )
-    txt_question = ft.Text(
-        "Wciśnij 'Start', aby rozpocząć grę!",
-        size=18,
-        weight=ft.FontWeight.BOLD,
-        text_align=ft.TextAlign.CENTER,
-    )
-    txt_feedback = ft.Text(
-        "",
-        size=16,
-        text_align=ft.TextAlign.CENTER,
-    )
 
-    txt_answer = ft.TextField(
-        label="Wpisz swoją odpowiedź...",
-        width=400,
-        text_align=ft.TextAlign.CENTER,
-    )
-    btn_submit_answer = ft.FilledButton(
-        "Zatwierdź odpowiedź",
-        icon=ft.Icons.CHECK,
-        width=400,
-    )
+class RegisterRequest(BaseModel):
+    name: str
 
-    answers_column = ft.Column(
-        [],
-        spacing=10,
-        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-        visible=False,
-    )
-    answer_box = ft.Column(
-        [txt_answer, btn_submit_answer, answers_column],
-        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-        visible=False,
-    )
 
-    btn_bid = ft.FilledButton("...", width=400)
-    btn_show_question = ft.FilledButton("Pokaż pytanie", width=400)
-    bidding_panel = ft.Column(
-        [btn_bid, btn_show_question],
-        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-        visible=False,
-    )
+class BidRequest(BaseModel):
+    player_id: str
+    kind: str  # "normal" albo "allin"
 
-    btn_5050 = ft.OutlinedButton(
-        "Kup podpowiedź 50/50 (losowo 500-2500 zł)",
-        width=400,
-        disabled=True,
-    )
-    btn_buy_abcd = ft.OutlinedButton(
-        "Kup opcje ABCD (losowo 1000-3000 zł)",
-        width=400,
-        disabled=True,
-    )
-    btn_next = ft.FilledButton("Następne pytanie", width=400, visible=False)
-    btn_back = ft.OutlinedButton(
-        "Wróć do menu",
-        icon=ft.Icons.ARROW_BACK,
-        width=400,
-        visible=False,
-        style=ft.ButtonStyle(color="red"),
-    )
 
-    game_view = ft.Column(
-        [
-            ft.Container(
-                ft.Row(
-                    [txt_money, txt_spent],
-                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                ),
-                padding=ft.padding.only(left=20, right=20, top=10, bottom=5),
-            ),
-            ft.Divider(height=1, color="grey_300"),
-            ft.Container(txt_counter, alignment=ft.alignment.center),
-            ft.Container(txt_pot, alignment=ft.alignment.center, padding=10),
-            ft.Container(txt_bonus, alignment=ft.alignment.center, padding=5),
-            ft.Container(
-                txt_question,
-                alignment=ft.alignment.center,
-                padding=ft.padding.only(
-                    left=20,
-                    right=20,
-                    top=10,
-                    bottom=10,
-                ),
-                height=100,
-            ),
-            bidding_panel,
-            answer_box,
-            ft.Divider(height=20, color="transparent"),
-            ft.Column(
-                [btn_5050, btn_buy_abcd, btn_next, txt_feedback, btn_back],
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                spacing=10,
-            ),
-        ],
-        visible=False,
-    )
+class ChatRequest(BaseModel):
+    player: str
+    message: str
 
-    main_feedback = ft.Text("", color="red", visible=False)
 
-    def menu_tile(i, color):
-        filename = f"{i:02d}.txt"
+class HeartbeatRequest(BaseModel):
+    player_id: str
 
-        async def click(e):
-            await start_game_session(e, filename)
 
-        return ft.Container(
-            content=ft.Text(
-                f"{i:02d}",
-                size=14,
-                weight=ft.FontWeight.BOLD,
-                color="black",
-            ),
-            width=46,
-            height=46,
-            alignment=ft.alignment.center,
-            bgcolor=color,
-            border_radius=100,
-            padding=0,
-            on_click=make_async_click(click),
-        )
+class SubmitScore(BaseModel):
+    player: str
+    score: int
+    time: int
 
-    menu_standard = [menu_tile(i, "blue_grey_50") for i in range(1, 31)]
-    menu_pop = [menu_tile(i, "deep_purple_50") for i in range(31, 41)]
-    menu_music = [menu_tile(i, "amber_50") for i in range(41, 51)]
 
-    # --- MULTIPLAYER UI ---------------------------------------------------
-    txt_mp_title = ft.Text(
-        "Tryb multiplayer – wspólna licytacja 20 s",
-        size=20,
-        weight=ft.FontWeight.BOLD,
-    )
-    txt_mp_info = ft.Text(
-        "1) Podaj ksywkę i dołącz do pokoju.\n"
-        "2) Licytuj +100 zł lub idź VA BANQUE.\n"
-        "3) Po 20 s wygrywa najwyższa stawka.",
-        size=14,
-        color="grey_700",
-    )
-    txt_mp_name = ft.TextField(label="Twoja ksywka", width=220)
-    btn_mp_join = ft.FilledButton("Dołącz do pokoju", width=180)
-    txt_mp_status = ft.Text("", size=12, color="blue")
+class LeaderboardEntry(BaseModel):
+    player: str
+    score: int
+    time: int
+    date: float
 
-    txt_mp_timer = ft.Text("Czas: -- s", size=16, weight=ft.FontWeight.BOLD)
-    txt_mp_pot = ft.Text(
-        "Pula: 0 zł",
-        size=18,
-        weight=ft.FontWeight.BOLD,
-        color="purple",
-    )
-    txt_mp_phase = ft.Text(
-        "Faza: licytacja",
-        size=14,
-        color="grey_700",
-    )
-    txt_mp_winner = ft.Text(
-        "",
-        size=14,
-        color="green",
-        weight=ft.FontWeight.BOLD,
-    )
 
-    btn_mp_bid = ft.FilledButton(
-        "Licytuj +100 zł (multiplayer)",
-        width=250,
-        disabled=True,
-    )
-    btn_mp_allin = ft.FilledButton(
-        "VA BANQUE!",
-        width=250,
-        disabled=True,
-    )
+class StateResponse(BaseModel):
+    round_id: int
+    phase: str
+    pot: int
+    time_left: float
+    answering_player_id: Optional[str]
+    players: List[PlayerState]
+    chat: List[ChatMessage]
 
-    col_mp_players = ft.Column([], height=160, scroll=ft.ScrollMode.AUTO)
-    col_mp_chat = ft.Column([], height=160, scroll=ft.ScrollMode.AUTO)
-    txt_mp_chat = ft.TextField(label="Napisz na czacie", expand=True)
-    btn_mp_chat_send = ft.FilledButton(
-        "Wyślij",
-        width=100,
-        disabled=True,
-    )
 
-    btn_mp_next_round = ft.OutlinedButton(
-        "Nowa runda (jeśli wszyscy skończyli)",
-        width=260,
-        disabled=True,
-    )
+# --- STAN SERWERA ---------------------------------------------------------
 
-    multiplayer_room = ft.Container(
-        ft.Column(
-            [
-                txt_mp_title,
-                txt_mp_info,
-                ft.Row([txt_mp_name, btn_mp_join], alignment="start"),
-                txt_mp_status,
-                ft.Divider(),
-                ft.Row(
-                    [txt_mp_timer, txt_mp_pot],
-                    alignment="spaceBetween",
-                ),
-                txt_mp_phase,
-                txt_mp_winner,
-                ft.Row([btn_mp_bid, btn_mp_allin], alignment="start"),
-                btn_mp_next_round,
-                ft.Row(
-                    [
-                        ft.Column(
-                            [
-                                ft.Text(
-                                    "Gracze:",
-                                    weight="bold",
-                                ),
-                                col_mp_players,
-                            ],
-                            width=260,
-                        ),
-                        ft.Column(
-                            [
-                                ft.Text(
-                                    "Czat:",
-                                    weight="bold",
-                                ),
-                                col_mp_chat,
-                                ft.Row([txt_mp_chat, btn_mp_chat_send]),
-                            ],
-                            expand=True,
-                        ),
-                    ],
-                    alignment="spaceBetween",
-                ),
-            ],
-            spacing=10,
-        ),
-        padding=15,
-        border_radius=10,
-        bgcolor=ft.Colors.BLUE_50,
-    )
 
-    # --- WIDOKI TRYBÓW ----------------------------------------------------
-    singleplayer_menu = ft.Column(
-        [
-            ft.Text("Wybierz zestaw pytań:", size=24, weight="bold"),
-            ft.Text(
-                "Pliki pobierane są bezpośrednio z GitHuba",
-                size=14,
-            ),
-            main_feedback,
-            ft.Divider(height=15),
-            ft.Row(menu_standard[:10], alignment="center", wrap=True),
-            ft.Row(menu_standard[10:20], alignment="center", wrap=True),
-            ft.Row(menu_standard[20:30], alignment="center", wrap=True),
-            ft.Divider(height=20),
-            ft.Text("Pytania popkultura:", size=22, weight="bold"),
-            ft.Row(menu_pop, alignment="center", wrap=True),
-            ft.Divider(height=20),
-            ft.Text(
-                "Pytania popkultura + muzyka:",
-                size=22,
-                weight="bold",
-            ),
-            ft.Row(menu_music, alignment="center", wrap=True),
-        ],
-        spacing=10,
-        horizontal_alignment="center",
-        visible=True,
-    )
+PLAYERS: Dict[str, Player] = {}
+BIDS: Dict[str, BidInfo] = {}
+CHAT: List[ChatMessage] = []
+LEADERBOARD: List[LeaderboardEntry] = []
 
-    singleplayer_view = ft.Column(
-        [
-            singleplayer_menu,
-            ft.Divider(height=20),
-            game_view,
-        ],
-        visible=True,
-    )
+ROUND_ID: int = 1
+PHASE: str = "bidding"  # "bidding" | "answering"
+ROUND_START_TS: float = time.time()
+BIDDING_DURATION: float = 20.0
+POT: int = 0
+ANSWERING_PLAYER_ID: Optional[str] = None
 
-    multiplayer_view = ft.Column(
-        [
-            multiplayer_room,
-        ],
-        visible=False,
-    )
+AFK_TIMEOUT: float = 30.0  # sekundy bez heartbeat/state → wyrzucenie
 
-    # przełącznik trybów
-    def show_singleplayer(e=None):
-        singleplayer_view.visible = True
-        multiplayer_view.visible = False
-        page.update()
 
-    def show_multiplayer(e=None):
-        singleplayer_view.visible = False
-        multiplayer_view.visible = True
-        page.update()
+# --- FUNKCJE POMOCNICZE ---------------------------------------------------
 
-    btn_mode_single = ft.FilledButton(
-        "Tryb SINGLEPLAYER",
-        on_click=show_singleplayer,
-    )
-    btn_mode_multi = ft.OutlinedButton(
-        "Tryb MULTIPLAYER",
-        on_click=show_multiplayer,
-    )
 
-    mode_bar = ft.Row(
-        [
-            btn_mode_single,
-            btn_mode_multi,
-        ],
-        alignment="center",
-    )
+def _recompute_pot() -> None:
+    global POT
+    POT = sum(b.amount for b in BIDS.values())
 
-    root = ft.Column(
-        [
-            mode_bar,
-            ft.Divider(),
-            singleplayer_view,
-            multiplayer_view,
-        ],
-        expand=True,
-        horizontal_alignment="center",
-    )
 
-    # ------------------- SINGLEPLAYER LOGIKA ------------------------
-    def refresh_money():
-        txt_money.value = f"Twoja kasa: {game['money']} zł"
-        if game["money"] <= 0:
-            txt_money.color = "red_700"
-        elif game["money"] < game["base_stake"]:
-            txt_money.color = "orange_600"
+def _time_left() -> float:
+    if PHASE != "bidding":
+        return 0.0
+    now = time.time()
+    left = BIDDING_DURATION - (now - ROUND_START_TS)
+    return max(0.0, left)
+
+
+def _auto_finish_if_needed() -> None:
+    """Jeśli czas licytacji minął — kończymy ją."""
+    global PHASE
+    if PHASE == "bidding" and _time_left() <= 0:
+        _finish_bidding(trigger="timer")
+
+
+def _finish_bidding(trigger: str) -> None:
+    """
+    Wybór zwycięzcy licytacji:
+    - największa kwota
+    - przy remisie: wcześniejszy timestamp
+    """
+    global PHASE, ANSWERING_PLAYER_ID
+
+    if not BIDS:
+        ANSWERING_PLAYER_ID = None
+        PHASE = "answering"
+        return
+
+    best: Optional[BidInfo] = None
+    for bid in BIDS.values():
+        if best is None:
+            best = bid
         else:
-            txt_money.color = "green_600"
-        page.update(txt_money)
+            if bid.amount > best.amount:
+                best = bid
+            elif bid.amount == best.amount and bid.ts < best.ts:
+                best = bid
 
-    def refresh_spent():
-        txt_spent.value = f"Wydano: {game['spent']} zł"
-        page.update(txt_spent)
+    if best is not None:
+        ANSWERING_PLAYER_ID = best.player_id
+    else:
+        ANSWERING_PLAYER_ID = None
 
-    def refresh_pot():
-        txt_pot.value = f"AKTUALNA PULA: {game['main_pot']} zł"
-        page.update(txt_pot)
+    PHASE = "answering"
 
-    def refresh_bonus():
-        txt_bonus.value = f"Bonus od banku: {game['bonus']} zł"
-        page.update(txt_bonus)
 
-    def refresh_counter():
-        idx = game["current_question_index"] + 1
-        total = game["total"]
-        name = game["set_name"]
-        txt_counter.value = f"Pytanie {idx} / {total} (Zestaw {name})"
-        page.update(txt_counter)
+def _start_new_round() -> None:
+    """Ręczne rozpoczęcie nowej rundy (admin, /next_round)."""
+    global ROUND_ID, PHASE, ROUND_START_TS, POT, ANSWERING_PLAYER_ID, BIDS
+    ROUND_ID += 1
+    PHASE = "bidding"
+    ROUND_START_TS = time.time()
+    POT = 0
+    ANSWERING_PLAYER_ID = None
+    BIDS = {}
 
-    def show_game_over(msg: str):
-        btn_5050.disabled = True
-        btn_buy_abcd.disabled = True
-        btn_next.disabled = True
-        txt_answer.disabled = True
-        btn_submit_answer.disabled = True
-        for b in answers_column.controls:
-            b.disabled = True
-        dlg = ft.AlertDialog(
-            modal=True,
-            title=ft.Text("Koniec gry!"),
-            content=ft.Text(msg),
-            actions=[
-                ft.TextButton(
-                    "Wróć do menu",
-                    on_click=back_to_menu,
-                ),
-            ],
+
+def _cleanup_afk() -> None:
+    """
+    Usuwa graczy, którzy nie wysłali heartbeat /state od AFK_TIMEOUT sekund.
+    Czyści też ich stawki i przelicza pulę.
+    """
+    global ANSWERING_PLAYER_ID
+
+    now = time.time()
+    to_delete = []
+
+    for pid, player in PLAYERS.items():
+        if now - player.last_seen > AFK_TIMEOUT:
+            to_delete.append(pid)
+
+    if not to_delete:
+        return
+
+    for pid in to_delete:
+        print(f"[AFK] Usuwam gracza {pid} ({PLAYERS[pid].name})")
+        del PLAYERS[pid]
+        if pid in BIDS:
+            del BIDS[pid]
+        if pid == ANSWERING_PLAYER_ID:
+            ANSWERING_PLAYER_ID = None
+
+    _recompute_pot()
+
+
+def _touch_player(player_id: str) -> None:
+    """Aktualizacja last_seen (przy heartbeat i state, gdy znamy id)."""
+    p = PLAYERS.get(player_id)
+    if p:
+        p.last_seen = time.time()
+
+
+# --- ENDPOINTY ------------------------------------------------------------
+
+
+@app.get("/")
+def root():
+    return {
+        "message": "Awantura o Kasę Multiplayer – Backend działa 🎉",
+        "docs": "/docs",
+    }
+
+
+# --- REJESTRACJA GRACZA ---------------------------------------------------
+
+
+@app.post("/register", response_model=Player)
+def register_player(req: RegisterRequest):
+    """
+    Rejestruje gracza; pierwszy gracz w systemie zostaje ADMINEM.
+    """
+    player_id = str(uuid.uuid4())
+    is_first_player = len(PLAYERS) == 0
+
+    player = Player(
+        id=player_id,
+        name=req.name,
+        money=10000,
+        is_admin=is_first_player,
+        last_seen=time.time(),
+    )
+    PLAYERS[player_id] = player
+    print(f"[REGISTER] {req.name} ({player_id}), admin={is_first_player}")
+    return player
+
+
+@app.get("/players", response_model=List[Player])
+def list_players():
+    _cleanup_afk()
+    return list(PLAYERS.values())
+
+
+# --- HEARTBEAT (utrzymanie przy życiu) -----------------------------------
+
+
+@app.post("/heartbeat")
+def heartbeat(req: HeartbeatRequest):
+    """
+    Frontend wywołuje co ~10 s.
+
+    Aktualizujemy last_seen i zwracamy info, czy gracz jest adminem.
+    Jeśli gracza nie ma (bo wygasł / został wyrzucony) → 404.
+    """
+    _cleanup_afk()
+
+    player = PLAYERS.get(req.player_id)
+    if not player:
+        raise HTTPException(status_code=404, detail="Gracz nie istnieje (AFK lub nieznany).")
+
+    player.last_seen = time.time()
+    return {"status": "ok", "is_admin": player.is_admin}
+
+
+# --- LICYTACJA ------------------------------------------------------------
+
+
+@app.post("/bid")
+def place_bid(req: BidRequest):
+    global PHASE
+
+    if req.player_id not in PLAYERS:
+        raise HTTPException(status_code=404, detail="Nie ma takiego gracza.")
+
+    _cleanup_afk()
+    _auto_finish_if_needed()
+
+    if PHASE != "bidding":
+        raise HTTPException(
+            status_code=400,
+            detail="Ta runda nie jest już w fazie licytacji.",
         )
-        page.dialog = dlg
-        dlg.open = True
-        page.update()
 
-    def check_answer(user_answer: str):
-        txt_answer.disabled = True
-        btn_submit_answer.disabled = True
-        btn_5050.disabled = True
-        btn_buy_abcd.disabled = True
-        for b in answers_column.controls:
-            b.disabled = True
+    player = PLAYERS[req.player_id]
+    player.last_seen = time.time()
+    now = time.time()
 
-        q = game["questions"][game["current_question_index"]]
-        correct = q["correct"]
-        pot = game["main_pot"]
-
-        norm_user = normalize_answer(user_answer)
-        norm_correct = normalize_answer(correct)
-        similarity = fuzz.ratio(norm_user, norm_correct)
-
-        if similarity >= 80:
-            game["money"] += pot
-            game["main_pot"] = 0
-            txt_feedback.value = (
-                f"DOBRZE! ({similarity}%) +{pot} zł\nPoprawna: {correct}"
-            )
-            txt_feedback.color = "green"
-        else:
-            txt_feedback.value = (
-                f"ŹLE ({similarity}%) – pula przechodzi dalej.\n"
-                f"Poprawna: {correct}"
-            )
-            txt_feedback.color = "red"
-
-        game["bid"] = 0
-        game["bonus"] = 0
-
-        refresh_money()
-        refresh_pot()
-        refresh_bonus()
-
-        btn_next.visible = True
-        btn_back.visible = True
-        page.update()
-
-    def submit_answer(e):
-        check_answer(txt_answer.value)
-
-    def abcd_click(e):
-        check_answer(e.control.data)
-
-    def hint_5050(e):
-        if not game["abcd_unlocked"]:
-            txt_feedback.value = "50/50 działa tylko po kupnie ABCD!"
-            txt_feedback.color = "orange"
-            page.update(txt_feedback)
-            return
-        cost = random.randint(500, 2500)
-        if game["money"] < cost:
-            txt_feedback.value = f"Nie stać Cię ({cost} zł)"
-            txt_feedback.color = "orange"
-            page.update(txt_feedback)
-            return
-        game["money"] -= cost
-        game["spent"] += cost
-        refresh_money()
-        refresh_spent()
-
-        q = game["questions"][game["current_question_index"]]
-        correct = q["correct"]
-        wrong = [a for a in q["answers"] if a != correct]
-        random.shuffle(wrong)
-        to_disable = wrong[:2]
-        for b in answers_column.controls:
-            if b.data in to_disable:
-                b.disabled = True
-                b.opacity = 0.3
-                b.on_click = None
-                b.update()
-
-        txt_feedback.value = (
-            f"Usunięto 2 błędne odpowiedzi! (koszt {cost} zł)"
-        )
-        txt_feedback.color = "blue"
-        page.update()
-
-    def buy_abcd(e):
-        cost = random.randint(1000, 3000)
-        if game["money"] < cost:
-            txt_feedback.value = f"Nie stać Cię ({cost} zł)"
-            txt_feedback.color = "orange"
-            page.update(txt_feedback)
-            return
-        game["abcd_unlocked"] = True
-        game["money"] -= cost
-        game["spent"] += cost
-        refresh_money()
-        refresh_spent()
-
-        txt_answer.visible = False
-        btn_submit_answer.visible = False
-        answers_column.visible = True
-        btn_buy_abcd.disabled = True
-        btn_5050.disabled = False
-
-        q = game["questions"][game["current_question_index"]]
-        answers_column.controls.clear()
-        shuffled = q["answers"][:]
-        random.shuffle(shuffled)
-        for ans in shuffled:
-            answers_column.controls.append(
-                ft.FilledButton(
-                    ans,
-                    width=400,
-                    data=ans,
-                    on_click=abcd_click,
-                )
-            )
-
-        txt_feedback.value = f"Kupiono ABCD (koszt {cost} zł)"
-        txt_feedback.color = "blue"
-        page.update()
-
-    def start_question(e):
-        game["current_question_index"] += 1
-        if not game["questions"] or game["current_question_index"] >= game["total"]:
-            if not game["questions"]:
-                show_game_over(
-                    f"Błąd: Zestaw {game['set_name']} nie zawiera pytań "
-                    "w poprawnym formacie. Spróbuj innego zestawu.",
-                )
-            else:
-                show_game_over(
-                    f"Ukończyłaś zestaw {game['set_name']}!\n"
-                    f"Kasa: {game['money']} zł",
-                )
-            return
-
-        refresh_counter()
-        q = game["questions"][game["current_question_index"]]
-        txt_question.value = q["question"]
-        txt_question.visible = True
-        bidding_panel.visible = False
-        txt_bonus.visible = False
-        answer_box.visible = True
-        txt_answer.visible = True
-        txt_answer.disabled = False
-        txt_answer.value = ""
-        btn_submit_answer.visible = True
-        btn_submit_answer.disabled = False
-        btn_buy_abcd.disabled = False
-        btn_5050.disabled = True
-        game["abcd_unlocked"] = False
-        answers_column.visible = False
-        answers_column.controls.clear()
-        txt_feedback.value = "Odpowiedz na pytanie:"
-        txt_feedback.color = "black"
-        page.update()
-
-
-    def bid_100(e):
-        if game["bid"] >= game["max_bid"]:
-            txt_feedback.value = (
-                f"Osiągnięto limit licytacji ({game['max_bid']} zł)"
-            )
-            txt_feedback.color = "orange"
-            page.update()
-            btn_bid.disabled = True
-            return
-
+    if req.kind == "normal":
         cost = 100
-        if game["money"] < cost:
-            txt_feedback.value = "Nie masz już pieniędzy!"
-            txt_feedback.color = "orange"
-            page.update(txt_feedback)
-            return
+        if player.money < cost:
+            raise HTTPException(
+                status_code=400,
+                detail="Za mało kasy na licytację +100.",
+            )
+        player.money -= cost
 
-        game["money"] -= cost
-        game["spent"] += cost
-        game["main_pot"] += cost
-        game["bid"] += cost
-
-        bonus_target = (game["bid"] // 1000) * 50
-        if bonus_target > game["bonus"]:
-            diff = bonus_target - game["bonus"]
-            game["bonus"] = bonus_target
-            game["main_pot"] += diff
-            txt_feedback.value = f"BONUS! Bank dorzuca {diff} zł"
-            txt_feedback.color = "blue"
+        if req.player_id in BIDS:
+            b = BIDS[req.player_id]
+            b.amount += cost
+            b.ts = now
         else:
-            txt_feedback.value = f"Wrzuciłaś {cost} zł."
-            txt_feedback.color = "black"
-
-        refresh_money()
-        refresh_spent()
-        refresh_pot()
-        refresh_bonus()
-        btn_bid.text = f"Licytuj +100 zł (Suma: {game['bid']} zł)"
-        if game["bid"] >= game["max_bid"]:
-            btn_bid.disabled = True
-        page.update()
-
-
-    def start_bidding(e):
-        if not game["questions"]:
-            show_game_over(
-                f"Zestaw {game['set_name']} nie zawiera pytań. "
-                "Wybierz inny zestaw.",
+            BIDS[req.player_id] = BidInfo(
+                player_id=req.player_id,
+                amount=cost,
+                is_all_in=False,
+                ts=now,
             )
-            return
 
-        stake = game["base_stake"]
-        if game["money"] < stake:
-            show_game_over(
-                f"Nie masz {stake} zł na rozpoczęcie gry!",
+        _recompute_pot()
+        return {"status": "ok", "pot": POT}
+
+    elif req.kind == "allin":
+        if player.money <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Nie możesz iść va banque z 0 zł.",
             )
-            return
 
-        game["money"] -= stake
-        game["spent"] += stake
-        game["main_pot"] = stake
-        game["bid"] = stake
-        game["bonus"] = 0
+        add_amount = player.money
+        player.money = 0
 
-        refresh_money()
-        refresh_spent()
-        refresh_pot()
-        refresh_bonus()
+        if req.player_id in BIDS:
+            b = BIDS[req.player_id]
+            b.amount += add_amount
+            b.is_all_in = True
+            b.ts = now
+        else:
+            BIDS[req.player_id] = BidInfo(
+                player_id=req.player_id,
+                amount=add_amount,
+                is_all_in=True,
+                ts=now,
+            )
 
-        txt_feedback.value = f"Start! Wrzuciłaś {stake} zł."
-        txt_feedback.color = "black"
-        txt_question.visible = False
-        answer_box.visible = False
-        btn_next.visible = False
-        btn_back.visible = False
-        btn_5050.disabled = True
-        btn_buy_abcd.disabled = True
-        bidding_panel.visible = True
-        txt_bonus.visible = True
-        btn_bid.disabled = False
-        btn_bid.text = f"Licytuj +100 zł (Suma: {game['bid']} zł)"
-        btn_show_question.disabled = False
-        page.update()
+        _recompute_pot()
+        _finish_bidding(trigger="allin")
+        return {"status": "ok", "pot": POT, "phase": PHASE}
 
-
-    def reset_game():
-        game["money"] = 10000
-        game["current_question_index"] = -1
-        game["main_pot"] = 0
-        game["spent"] = 0
-        game["bid"] = 0
-        game["bonus"] = 0
-        txt_question.value = "Rozpoczęto grę — rozpocznij licytację!"
-        txt_feedback.value = "Witaj w grze!"
-        txt_feedback.color = "black"
-        bidding_panel.visible = False
-        answer_box.visible = False
-        btn_next.visible = False
-        btn_back.visible = False
-        btn_5050.disabled = True
-        btn_buy_abcd.disabled = True
-        refresh_money()
-        refresh_spent()
-        refresh_pot()
-        refresh_bonus()
-        page.update()
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Nieznany rodzaj licytacji.",
+        )
 
 
-    def back_to_menu(e=None):
-        singleplayer_menu.visible = True
-        game_view.visible = False
-        if page.dialog:
-            page.dialog.open = False
-        page.update()
+# --- NOWA RUNDA (np. wywoływana przez admina z frontu) --------------------
 
 
-    async def start_game_session(e, filename: str):
-        print(f"[LOAD] Pobieram zestaw: {filename}")
-        questions = await parse_question_file(page, filename)
-        game["questions"] = questions
-        game["total"] = len(questions)
-        game["set_name"] = filename.replace(".txt", "")
-        reset_game()
-        singleplayer_menu.visible = False
-        game_view.visible = True
-        main_feedback.visible = False
-        page.update()
-        start_bidding(None)
+@app.post("/next_round")
+def next_round():
+    _cleanup_afk()
+    _start_new_round()
+    return {"status": "ok", "round_id": ROUND_ID}
+
+
+# --- STAN GRY -------------------------------------------------------------
+
+
+@app.get("/state", response_model=StateResponse)
+def get_state():
+    """
+    Zwraca:
+    - aktualną fazę
+    - pulę
+    - czas do końca licytacji
+    - gracza, który wygrał licytację (answering_player_id)
+    - listę graczy (z is_admin)
+    - czat (ostatnie 30 wpisów)
+    """
+    _cleanup_afk()
+    _auto_finish_if_needed()
+
+    players_state: List[PlayerState] = []
+    for pid, p in PLAYERS.items():
+        bid_info = BIDS.get(pid)
+        bid_amount = bid_info.amount if bid_info else 0
+        is_all_in = bid_info.is_all_in if bid_info else False
+        players_state.append(
+            PlayerState(
+                id=p.id,
+                name=p.name,
+                money=p.money,
+                bid=bid_amount,
+                is_all_in=is_all_in,
+                is_admin=p.is_admin,
+            )
+        )
+
+    chat_slice = CHAT[-30:]
+
+    return StateResponse(
+        round_id=ROUND_ID,
+        phase=PHASE,
+        pot=POT,
+        time_left=_time_left(),
+        answering_player_id=ANSWERING_PLAYER_ID,
+        players=players_state,
+        chat=chat_slice,
+    )
+
+
+# --- CZAT -----------------------------------------------------------------
+
+
+@app.post("/chat")
+def post_chat(msg: ChatRequest):
+    _cleanup_afk()
+    CHAT.append(
+        ChatMessage(
+            player=msg.player,
+            message=msg.message,
+            timestamp=time.time(),
+        )
+    )
+    if len(CHAT) > 200:
+        del CHAT[:-200]
+    return {"status": "ok"}
+
+
+@app.get("/chat", response_model=List[ChatMessage])
+def get_chat():
+    _cleanup_afk()
+    return CHAT[-50:]
+
+
+# --- LEADERBOARD ----------------------------------------------------------
+
+
+@app.post("/submit")
+def submit_score(score: SubmitScore):
+    entry = LeaderboardEntry(
+        player=score.player,
+        score=score.score,
+        time=score.time,
+        date=time.time(),
+    )
+    LEADERBOARD.append(entry)
+    LEADERBOARD.sort(key=lambda e: e.score, reverse=True)
+    if len(LEADERBOARD) > 100:
+        del LEADERBOARD[100:]
+    return {"status": "ok"}
+
+
+@app.get("/leaderboard")
+def get_leaderboard():
+    _cleanup_afk()
+    return LEADERBOARD[:50]
