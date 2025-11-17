@@ -3,7 +3,6 @@ import random
 import re
 import json
 import asyncio
-
 import js
 from js import fetch
 from thefuzz import fuzz
@@ -17,17 +16,15 @@ GITHUB_RAW_BASE_URL = (
 )
 
 
-# -------------------- POMOCNICZE --------------------
-
-
 def make_async_click(async_callback):
     def handler(e):
         async def task():
             await async_callback(e)
-
         e.page.run_task(task)
-
     return handler
+
+
+# -------------------- POBIERANIE PLIKÓW Z GITHUBA --------------------
 
 
 async def fetch_text(url: str) -> str:
@@ -40,18 +37,14 @@ async def fetch_text(url: str) -> str:
 
 
 async def fetch_json(url: str, method: str = "GET", body: dict | None = None):
-    """
-    Uniwersalny wrapper na fetch -> JSON (dla Pyodide).
-    """
     try:
-        method = method.upper()
-        if method == "GET":
+        if method.upper() == "GET":
             kwargs = js.Object.fromEntries([["method", "GET"]])
         else:
             payload = json.dumps(body or {})
             kwargs = js.Object.fromEntries(
                 [
-                    ["method", method],
+                    ["method", method.upper()],
                     [
                         "headers",
                         js.Object.fromEntries(
@@ -61,7 +54,6 @@ async def fetch_json(url: str, method: str = "GET", body: dict | None = None):
                     ["body", payload],
                 ]
             )
-
         resp = await fetch(url, kwargs)
         raw = await resp.json()
         try:
@@ -74,9 +66,6 @@ async def fetch_json(url: str, method: str = "GET", body: dict | None = None):
 
 
 async def parse_question_file(page: ft.Page, filename: str) -> list[dict]:
-    """
-    Pobranie i sparsowanie pliku z pytaniami z GitHuba.
-    """
     url = f"{GITHUB_RAW_BASE_URL}{filename}"
     print(f"[FETCH] Pobieram: {url}")
     content = await fetch_text(url)
@@ -152,7 +141,7 @@ def normalize_answer(text: str) -> str:
     return "".join(text.split())
 
 
-# -------------------- FRONTEND MAIN --------------------
+# -------------------- MAIN FRONTEND --------------------
 
 
 async def main(page: ft.Page):
@@ -161,7 +150,7 @@ async def main(page: ft.Page):
     page.scroll = ft.ScrollMode.AUTO
     page.vertical_alignment = ft.MainAxisAlignment.START
 
-    # -------------------- STAN SINGLEPLAYER --------------------
+    # STAN SINGLEPLAYER
     game = {
         "money": 10000,
         "current_question_index": -1,
@@ -176,30 +165,30 @@ async def main(page: ft.Page):
         "total": 0,
         "set_name": "",
         "answer_submitted": False,
-        "mp_set_no": None,  # aktualny zestaw w multi
+        "answer_time_total": 60,  # podstawowe 60s
     }
 
-    # -------------------- STAN MULTIPLAYER --------------------
+    # STAN MULTIPLAYER
     mp_state = {
         "player_id": None,
         "player_name": "",
         "is_admin": False,
         "is_observer": False,
         "joined": False,
-        "known_players": set(),  # do wykrywania, kto wyszedł
+        "question_set_selected": False,
     }
 
-    # mapowanie nazwa -> kolor (ciemne odcienie)
+    # kolory nicków
     name_color_cache: dict[str, str] = {}
     color_palette = [
-        "#1e3a8a",  # dark blue
-        "#4c1d95",  # dark purple
-        "#064e3b",  # dark green
-        "#7c2d12",  # dark brown
-        "#111827",  # almost black
-        "#075985",  # dark cyan
-        "#7f1d1d",  # dark red
-        "#374151",  # dark grey
+        "#1e3a8a",
+        "#4c1d95",
+        "#064e3b",
+        "#7c2d12",
+        "#111827",
+        "#075985",
+        "#7f1d1d",
+        "#374151",
     ]
 
     def name_to_color(name: str) -> str:
@@ -209,7 +198,7 @@ async def main(page: ft.Page):
         name_color_cache[name] = color_palette[idx]
         return color_palette[idx]
 
-    # -------------------- KOMPONENTY SINGLEPLAYER --------------------
+    # --------- WSPÓLNE KOMPONENTY GÓRY ---------
 
     txt_money = ft.Text(
         "Twoja kasa: 10000 zł",
@@ -223,22 +212,19 @@ async def main(page: ft.Page):
         color="grey_700",
         text_align=ft.TextAlign.RIGHT,
     )
-
-    # "Pytanie X / XX (Zestaw XX)   PULA: XXX zł"
-    txt_counter_left = ft.Text(
+    txt_counter = ft.Text(
         "Pytanie 0 / 0 (Zestaw --)",
         size=15,
         color="grey_800",
-        text_align=ft.TextAlign.LEFT,
+        text_align=ft.TextAlign.CENTER,
     )
-    txt_counter_pot = ft.Text(
+    txt_pot = ft.Text(
         "PULA: 0 zł",
-        size=15,
+        size=18,
         weight=ft.FontWeight.BOLD,
         color="purple_700",
-        text_align=ft.TextAlign.RIGHT,
+        text_align=ft.TextAlign.CENTER,
     )
-
     txt_bonus = ft.Text(
         "Bonus od banku: 0 zł",
         size=14,
@@ -252,7 +238,7 @@ async def main(page: ft.Page):
         size=18,
         weight=ft.FontWeight.BOLD,
         text_align=ft.TextAlign.CENTER,
-        color="#0f172a",  # ciemny granat
+        color="#0f172a",
     )
 
     txt_feedback = ft.Text(
@@ -261,42 +247,39 @@ async def main(page: ft.Page):
         text_align=ft.TextAlign.CENTER,
     )
 
-    # -------------------- CZAT (BOX) --------------------
+    # --------- CZAT (LISTVIEW) ---------
 
-    # ListView z auto_scroll – Flet zatrzymuje auto-scroll,
-    # gdy użytkownik sam przewinie w górę.
-    col_mp_chat = ft.ListView(
+    lv_mp_chat = ft.ListView(
+        expand=False,
+        height=150,
         spacing=2,
-        height=140,  # ok. 6 linii
-        auto_scroll=True,
+        auto_scroll=True,  # nowe wiadomości przewijają do dołu
     )
 
     txt_mp_chat = ft.TextField(
-        label="Napisz na czacie (admin: wpisz 01–50 aby wybrać zestaw)",
+        hint_text="Napisz na czacie...",
         multiline=False,
         dense=True,
         border_radius=8,
         text_size=13,
-        disabled=True,
     )
     btn_mp_chat_send = ft.FilledButton(
         "Wyślij",
-        width=140,
+        width=120,
         disabled=True,
     )
 
     chat_box = ft.Container(
         content=ft.Column(
             [
-                ft.Text(
-                    "Czat (multiplayer):",
-                    size=12,
-                    color="grey_700",
+                lv_mp_chat,
+                ft.Row(
+                    [
+                        txt_mp_chat,
+                        btn_mp_chat_send,
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                 ),
-                col_mp_chat,
-                ft.Container(height=4),
-                txt_mp_chat,
-                btn_mp_chat_send,
             ],
             spacing=4,
         ),
@@ -306,7 +289,7 @@ async def main(page: ft.Page):
         bgcolor="white",
     )
 
-    # -------------------- ODPOWIEDŹ / PRZYCISKI --------------------
+    # --------- ODPOWIEDŹ + TIMER ---------
 
     txt_answer = ft.TextField(
         label="Wpisz swoją odpowiedź...",
@@ -330,9 +313,11 @@ async def main(page: ft.Page):
     answer_box = ft.Column(
         [txt_answer, btn_submit_answer, pb_answer_timer, answers_column],
         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-        spacing=6,
+        spacing=4,
         visible=False,
     )
+
+    # --------- PODPOWIEDZI (VERTICAL) ---------
 
     btn_5050 = ft.OutlinedButton(
         "Kup podpowiedź 50/50 (losowo 500–2500 zł)",
@@ -345,8 +330,9 @@ async def main(page: ft.Page):
         disabled=True,
     )
 
-    help_buttons_col = ft.Column(
-        [btn_5050, btn_buy_abcd],
+    single_controls = ft.Column(
+        [btn_buy_abcd, btn_5050],
+        alignment=ft.MainAxisAlignment.CENTER,
         spacing=4,
         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
     )
@@ -364,13 +350,19 @@ async def main(page: ft.Page):
         style=ft.ButtonStyle(color="red"),
     )
 
-    bottom_controls = ft.Row(
+    single_bottom_controls = ft.Row(
         [btn_next, btn_back],
         alignment=ft.MainAxisAlignment.CENTER,
-        spacing=10,
+        spacing=8,
     )
 
-    # -------------------- KOMPONENTY MULTIPLAYER --------------------
+    # --------- MULTI: PANEL GÓRNY ---------
+
+    txt_mp_info = ft.Text(
+        "",
+        size=12,
+        color="grey_700",
+    )
 
     txt_mp_name = ft.TextField(
         label="Twoja ksywka",
@@ -393,7 +385,7 @@ async def main(page: ft.Page):
     )
 
     btn_mp_bid = ft.FilledButton(
-        "Licytuj +100 zł (multiplayer)",
+        "Licytuj +100 zł",
         width=220,
         disabled=True,
     )
@@ -414,24 +406,7 @@ async def main(page: ft.Page):
         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
     )
 
-    mp_join_row = ft.Row(
-        [txt_mp_name, btn_mp_join],
-        alignment=ft.MainAxisAlignment.START,
-        spacing=10,
-    )
-
-    mp_header = ft.Column(
-        [
-            mp_join_row,
-            txt_mp_status,
-            ft.Row([txt_mp_timer, txt_mp_pot], alignment="spaceBetween"),
-            mp_buttons_col,
-            ft.Divider(height=6),
-        ],
-        spacing=4,
-    )
-
-    # -------------------- MENU GŁÓWNE --------------------
+    # --------- MENU GŁÓWNE ---------
 
     main_feedback = ft.Text("", color="red", visible=False)
 
@@ -450,22 +425,67 @@ async def main(page: ft.Page):
         spacing=20,
     )
 
+    # --------- WYBÓR ZESTAWU (SINGLEPLAYER) ---------
+
     async def start_game_session_single(filename: str):
-        print(f"[LOAD SINGLE] Pobieram zestaw: {filename}")
         questions = await parse_question_file(page, filename)
         game["questions"] = questions
         game["total"] = len(questions)
         game["set_name"] = filename.replace(".txt", "")
-        game["mp_set_no"] = None
         reset_game()
         main_menu.visible = False
-        game_view.visible = True
         multiplayer_view.visible = False
+        game_view.visible = True
         main_feedback.visible = False
         single_set_selector.visible = False
-        txt_question.value = ""
         page.update()
         start_bidding_single()
+
+    async def mp_select_question_set(set_number: int):
+        """ADMIN wybiera zestaw przez wpisanie numeru 1–50 na czacie."""
+        if not mp_state["is_admin"]:
+            txt_mp_status.value = "Tylko ADMIN może wybierać zestaw pytań."
+            txt_mp_status.color = "red"
+            txt_mp_status.update()
+            return
+
+        if mp_state["question_set_selected"]:
+            return
+
+        filename = f"{set_number:02d}.txt"
+
+        # Info od bota
+        await fetch_json(
+            f"{BACKEND_URL}/chat",
+            "POST",
+            {
+                "player": "BOT",
+                "message": f"Wybrano zestaw pytań nr {set_number:02d}.",
+            },
+        )
+        await fetch_json(
+            f"{BACKEND_URL}/chat",
+            "POST",
+            {
+                "player": "BOT",
+                "message": "Gra rozpocznie się za chwilę. Przygotujcie się do licytacji!",
+            },
+        )
+
+        questions = await parse_question_file(page, filename)
+        game["questions"] = questions
+        game["total"] = len(questions)
+        game["set_name"] = filename.replace(".txt", "")
+
+        mp_state["question_set_selected"] = True
+
+        main_menu.visible = False
+        game_view.visible = True
+        multiplayer_view.visible = True
+        page.update()
+
+        # backend startuje pierwszą rundę / licytację
+        await fetch_json(f"{BACKEND_URL}/next_round", "POST", {})
 
     def menu_tile(i: int, color: str):
         filename = f"{i:02d}.txt"
@@ -518,7 +538,7 @@ async def main(page: ft.Page):
         visible=False,
     )
 
-    # -------------------- WIDOK GRY --------------------
+    # --------- WIDOK GRY (WSPÓLNY SINGLE / MULTI) ---------
 
     game_view = ft.Column(
         [
@@ -532,26 +552,20 @@ async def main(page: ft.Page):
             ft.Divider(height=1, color="grey_300"),
             ft.Container(
                 content=ft.Row(
-                    [txt_counter_left, txt_counter_pot],
-                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    [txt_counter, txt_pot],
+                    alignment=ft.MainAxisAlignment.SPACE_AROUND,
                 ),
-                padding=ft.padding.only(left=16, right=16, top=4, bottom=4),
+                padding=ft.padding.only(left=8, right=8, top=6, bottom=4),
             ),
             ft.Container(txt_bonus, alignment=ft.alignment.center, padding=4),
-            mp_header,
             chat_box,
             ft.Container(
-                help_buttons_col,
-                alignment=ft.alignment.center,
-                padding=ft.padding.only(top=6, bottom=4),
-            ),
-            ft.Container(
-                txt_question,
-                alignment=ft.alignment.center,
-                padding=ft.padding.only(left=16, right=16, top=4, bottom=4),
-            ),
-            ft.Container(
                 answer_box,
+                alignment=ft.alignment.center,
+                padding=ft.padding.only(top=4, bottom=4),
+            ),
+            ft.Container(
+                single_controls,
                 alignment=ft.alignment.center,
                 padding=ft.padding.only(top=4, bottom=4),
             ),
@@ -561,22 +575,44 @@ async def main(page: ft.Page):
                 padding=4,
             ),
             ft.Container(
-                bottom_controls,
+                single_bottom_controls,
                 alignment=ft.alignment.center,
-                padding=ft.padding.only(top=6, bottom=10),
+                padding=ft.padding.only(top=4, bottom=8),
             ),
         ],
         visible=False,
         spacing=4,
     )
 
+    # --------- NAGŁÓWEK MULTIPLAYER (bez napisu "Tryb multiplayer") ---------
+
+    mp_join_row = ft.Row(
+        [txt_mp_name, btn_mp_join],
+        alignment=ft.MainAxisAlignment.START,
+        spacing=10,
+    )
+
+    mp_header = ft.Column(
+        [
+            mp_join_row,
+            txt_mp_status,
+            ft.Row([txt_mp_timer, txt_mp_pot], alignment="spaceBetween"),
+            mp_buttons_col,
+            ft.Divider(),
+        ],
+        spacing=4,
+    )
+
     multiplayer_view = ft.Column(
         [
+            mp_header,
             game_view,
         ],
         visible=False,
         spacing=4,
     )
+
+    # --------- EKRAN STARTOWY ---------
 
     main_menu = ft.Column(
         [
@@ -614,8 +650,8 @@ async def main(page: ft.Page):
         txt_spent.update()
 
     def refresh_pot():
-        txt_counter_pot.value = f"PULA: {game['main_pot']} zł"
-        txt_counter_pot.update()
+        txt_pot.value = f"PULA: {game['main_pot']} zł"
+        txt_pot.update()
 
     def refresh_bonus():
         txt_bonus.value = f"Bonus od banku: {game['bonus']} zł"
@@ -625,8 +661,8 @@ async def main(page: ft.Page):
         idx = game["current_question_index"] + 1
         total = game["total"]
         name = game["set_name"]
-        txt_counter_left.value = f"Pytanie {idx} / {total} (Zestaw {name})"
-        txt_counter_left.update()
+        txt_counter.value = f"Pytanie {idx} / {total} (Zestaw {name})"
+        txt_counter.update()
 
     def show_game_over(msg: str):
         btn_5050.disabled = True
@@ -719,6 +755,7 @@ async def main(page: ft.Page):
 
         game["money"] -= cost
         game["spent"] += cost
+        game["answer_time_total"] += 30  # +30s na liczniku
         refresh_money()
         refresh_spent()
 
@@ -735,7 +772,7 @@ async def main(page: ft.Page):
                 b.update()
 
         txt_feedback.value = (
-            f"Usunięto 2 błędne odpowiedzi! (koszt {cost} zł)"
+            f"Usunięto 2 błędne odpowiedzi! (koszt {cost} zł, +30s)"
         )
         txt_feedback.color = "blue"
         txt_feedback.update()
@@ -751,6 +788,7 @@ async def main(page: ft.Page):
         game["abcd_unlocked"] = True
         game["money"] -= cost
         game["spent"] += cost
+        game["answer_time_total"] += 30  # +30s
         refresh_money()
         refresh_spent()
 
@@ -774,15 +812,17 @@ async def main(page: ft.Page):
                 )
             )
 
-        txt_feedback.value = f"Kupiono ABCD (koszt {cost} zł)"
+        txt_feedback.value = f"Kupiono ABCD (koszt {cost} zł, +30s)"
         txt_feedback.color = "blue"
         page.update()
 
     async def answer_timeout():
+        # animacja paska postępu nad przyciskiem
         pb_answer_timer.visible = True
         pb_answer_timer.value = 0
         pb_answer_timer.update()
-        steps = 60
+        total = game["answer_time_total"]
+        steps = total
         for i in range(steps):
             if game["answer_submitted"]:
                 return
@@ -790,10 +830,12 @@ async def main(page: ft.Page):
             pb_answer_timer.update()
             await asyncio.sleep(1)
         if not game["answer_submitted"]:
+            # czas minął – przycisk "sam się naciska"
             check_answer(txt_answer.value)
 
     def start_question(e):
         game["current_question_index"] += 1
+        game["answer_time_total"] = 60
         if not game["questions"] or game["current_question_index"] >= game[
             "total"
         ]:
@@ -856,7 +898,7 @@ async def main(page: ft.Page):
 
         txt_feedback.value = f"Start! Wrzuciłaś {stake} zł."
         txt_feedback.color = "black"
-        txt_question.value = ""
+        txt_question.value = "Rozpoczęto grę — rozpocznij odpowiadanie."
         txt_question.update()
 
         btn_next.visible = False
@@ -874,8 +916,9 @@ async def main(page: ft.Page):
         game["bid"] = 0
         game["bonus"] = 0
         game["answer_submitted"] = False
+        game["answer_time_total"] = 60
         txt_question.value = ""
-        txt_feedback.value = ""
+        txt_feedback.value = "Witaj w grze!"
         txt_feedback.color = "black"
         answer_box.visible = False
         btn_next.visible = False
@@ -897,11 +940,11 @@ async def main(page: ft.Page):
             page.dialog.open = False
         page.update()
 
-    # -------------------- FUNKCJE MULTIPLAYER --------------------
+    # -------------------- CZAT: RENDER Z BACKENDU --------------------
 
     def render_chat_from_state(chat_list: list[dict], players_state: list[dict]):
-        admin_names = {p.get("name", "") for p in players_state if p.get("is_admin")}
-        col_mp_chat.controls.clear()
+        admin_names = {p.get("name") for p in players_state if p.get("is_admin")}
+        lv_mp_chat.controls.clear()
 
         for m in chat_list:
             player_name = m.get("player", "?")
@@ -921,12 +964,25 @@ async def main(page: ft.Page):
                         ),
                     )
                 )
-                spans.append(
-                    ft.TextSpan(
-                        msg_text,
-                        ft.TextStyle(color="black", size=12),
+                # BOT: pytanie w ciemnym granacie
+                if msg_text.startswith("PYTANIE:"):
+                    spans.append(
+                        ft.TextSpan(
+                            msg_text,
+                            ft.TextStyle(
+                                color="#0f172a",
+                                weight=ft.FontWeight.BOLD,
+                                size=12,
+                            ),
+                        )
                     )
-                )
+                else:
+                    spans.append(
+                        ft.TextSpan(
+                            msg_text,
+                            ft.TextStyle(color="black", size=12),
+                        )
+                    )
             else:
                 is_admin = player_name in admin_names
                 if is_admin:
@@ -940,7 +996,6 @@ async def main(page: ft.Page):
                             ),
                         )
                     )
-
                 name_color = name_to_color(player_name)
                 spans.append(
                     ft.TextSpan(
@@ -959,7 +1014,7 @@ async def main(page: ft.Page):
                     )
                 )
 
-            col_mp_chat.controls.append(
+            lv_mp_chat.controls.append(
                 ft.Text(
                     spans=spans,
                     max_lines=3,
@@ -967,7 +1022,9 @@ async def main(page: ft.Page):
                 )
             )
 
-        col_mp_chat.update()
+        lv_mp_chat.update()
+
+    # -------------------- MULTIPLAYER: REJESTRACJA --------------------
 
     async def mp_register(e):
         name = (txt_mp_name.value or "").strip()
@@ -995,6 +1052,13 @@ async def main(page: ft.Page):
         txt_mp_status.value = f"Dołączono jako {mp_state['player_name']}."
         if mp_state["is_admin"]:
             txt_mp_status.value += " (ADMIN)"
+            txt_mp_info.value = (
+                "ADMIN: Wpisz numer 1–50 na czacie, aby wybrać zestaw pytań."
+            )
+        else:
+            txt_mp_info.value = (
+                "Czekaj na ADMINA – wybierze zestaw pytań i rozpocznie grę."
+            )
         txt_mp_status.color = "green"
 
         mp_join_row.visible = False
@@ -1004,32 +1068,11 @@ async def main(page: ft.Page):
         btn_mp_finish.disabled = False
         btn_mp_allin.disabled = False
 
+        multiplayer_view.visible = True
+        game_view.visible = True
+
         page.update()
 
-        # po dołączeniu – sprawdź ilu jest graczy i ew. komunikat BOTA
-        state = await fetch_json(f"{BACKEND_URL}/state", "GET")
-        if state and isinstance(state, dict):
-            players_list = state.get("players", [])
-            player_count = len(players_list)
-            if mp_state["is_admin"] and player_count >= 2:
-                await fetch_json(
-                    f"{BACKEND_URL}/chat",
-                    "POST",
-                    {
-                        "player": "BOT",
-                        "message": "Dołączyło co najmniej 2 graczy, możemy zaczynać grę multiplayer!",
-                    },
-                )
-                await fetch_json(
-                    f"{BACKEND_URL}/chat",
-                    "POST",
-                    {
-                        "player": "BOT",
-                        "message": "Aby rozpocząć grę, ADMIN wybiera zestaw pytań, wpisując cyfrę od 01 do 50 na czacie.",
-                    },
-                )
-
-        # uruchom heartbeat i polling stanu
         page.run_task(mp_heartbeat_loop)
         page.run_task(mp_poll_state)
 
@@ -1047,109 +1090,29 @@ async def main(page: ft.Page):
                 return
             mp_state["is_admin"] = resp.get("is_admin", mp_state["is_admin"])
 
-    async def mp_admin_select_set(n: int):
-        """
-        ADMIN wybiera zestaw n (1–50):
-        - ładuje pytania lokalnie
-        - wysyła BOT-komunikaty
-        - wywołuje /next_round
-        """
-        filename = f"{n:02d}.txt"
-        questions = await parse_question_file(page, filename)
-        if not questions:
-            txt_mp_status.value = (
-                f"Nie udało się załadować zestawu {filename}."
-            )
-            txt_mp_status.color = "red"
-            txt_mp_status.update()
-            return
-
-        game["questions"] = questions
-        game["total"] = len(questions)
-        game["set_name"] = filename.replace(".txt", "")
-        game["current_question_index"] = -1
-        game["main_pot"] = 0
-        game["mp_set_no"] = n
-
-        refresh_counter()
-        refresh_pot()
-
-        # BOT informuje wszystkich graczy
-        await fetch_json(
-            f"{BACKEND_URL}/chat",
-            "POST",
-            {
-                "player": "BOT",
-                "message": f"Zestaw pytań nr: {filename.replace('.txt', '')} został wybrany.",
-            },
-        )
-        await fetch_json(
-            f"{BACKEND_URL}/chat",
-            "POST",
-            {
-                "player": "BOT",
-                "message": "Gra rozpocznie się – odliczanie na czacie (20 s).",
-            },
-        )
-
-        # Opcjonalne „udawane” odliczanie co 5 s
-        async def countdown_task():
-            for left in [20, 15, 10, 5]:
-                await asyncio.sleep(5)
-                await fetch_json(
-                    f"{BACKEND_URL}/chat",
-                    "POST",
-                    {
-                        "player": "BOT",
-                        "message": f"Start za {left} s...",
-                    },
-                )
-
-            await fetch_json(
-                f"{BACKEND_URL}/chat",
-                "POST",
-                {
-                    "player": "BOT",
-                    "message": "Start! Rozpoczynamy licytację.",
-                },
-            )
-
-        page.run_task(countdown_task)
-
-        # nowa runda w backendzie
-        await fetch_json(f"{BACKEND_URL}/next_round", "POST", {})
-
-        txt_mp_status.value = f"Zestaw {filename} wybrany, trwa odliczanie."
-        txt_mp_status.color = "blue"
-        txt_mp_status.update()
+    # -------------------- WYSYŁANIE WIADOMOŚCI NA CZACIE --------------------
 
     async def mp_send_chat(e):
         msg = (txt_mp_chat.value or "").strip()
         if not msg:
             return
-        if not mp_state["player_id"]:
-            txt_mp_status.value = "Najpierw dołącz do pokoju."
-            txt_mp_status.color = "red"
-            txt_mp_status.update()
-            return
 
-        # ADMIN: jeśli wpisał tylko liczbę, traktujemy to jako komendę wyboru zestawu
-        if mp_state["is_admin"] and msg.isdigit():
-            raw_val = msg.lstrip("0")
-            if raw_val == "":
-                raw_val = "0"
+        # ADMIN wybiera zestaw – numer 1–50 (działa też np. "07")
+        if (
+            mp_state["is_admin"]
+            and not mp_state["question_set_selected"]
+            and msg.isdigit()
+        ):
             try:
-                n = int(raw_val)
+                num = int(msg)
             except ValueError:
-                n = 0
-            if 1 <= n <= 50:
-                # nie wysyłamy numeru jako zwykła wiadomość – zamiast tego uruchamiamy logikę wyboru
+                num = 0
+            if 1 <= num <= 50:
                 txt_mp_chat.value = ""
                 txt_mp_chat.update()
-                await mp_admin_select_set(n)
+                await mp_select_question_set(num)
                 return
 
-        # zwykła wiadomość czatu
         name = mp_state["player_name"] or "Anonim"
         await fetch_json(
             f"{BACKEND_URL}/chat",
@@ -1158,6 +1121,8 @@ async def main(page: ft.Page):
         )
         txt_mp_chat.value = ""
         txt_mp_chat.update()
+
+    # -------------------- LICYTACJA --------------------
 
     async def mp_bid(kind: str):
         if not mp_state["player_id"]:
@@ -1213,14 +1178,12 @@ async def main(page: ft.Page):
             txt_mp_status.color = "blue"
         txt_mp_status.update()
 
+    # -------------------- POLLING STANU GRY --------------------
+
     async def mp_poll_state():
-        """
-        Pętla: pobiera stan, odświeża UI, wykrywa zmiany graczy
-        i wybór zestawu na podstawie BOT-komunikatu.
-        """
         while True:
             data = await fetch_json(f"{BACKEND_URL}/state", "GET")
-            if not data or not isinstance(data, dict):
+            if not data:
                 await asyncio.sleep(1.5)
                 continue
 
@@ -1231,64 +1194,36 @@ async def main(page: ft.Page):
             players_list = data.get("players", [])
             chat_list = data.get("chat", [])
 
-            # wykrywanie, że ktoś wyszedł – tylko ADMIN wysyła BOT-a, żeby się nie powielało
-            current_names = {p.get("name", "?") for p in players_list}
-            if mp_state["is_admin"] and mp_state["known_players"]:
-                left = mp_state["known_players"] - current_names
-                for name in left:
-                    await fetch_json(
-                        f"{BACKEND_URL}/chat",
-                        "POST",
-                        {
-                            "player": "BOT",
-                            "message": f"{name} opuścił grę.",
-                        },
-                    )
-            mp_state["known_players"] = current_names
-
-            # render czatu
+            # render czatu (z botem i adminem)
             render_chat_from_state(chat_list, players_list)
 
-            # wykrycie wyboru zestawu na podstawie BOTA:
-            # "Zestaw pytań nr: XX został wybrany."
-            chosen_set_no = None
-            for m in chat_list:
-                if m.get("player") != "BOT":
-                    continue
-                text = (m.get("message") or "").strip()
-                m2 = re.search(
-                    r"Zestaw pytań nr:\s*(\d{1,2})",
-                    text,
-                    re.IGNORECASE,
-                )
-                if m2:
-                    try:
-                        n = int(m2.group(1))
-                    except ValueError:
-                        continue
-                    if 1 <= n <= 50:
-                        chosen_set_no = n
+            phase = data.get("phase")
+            answering_id = data.get("answering_player_id")
 
-            if chosen_set_no is not None and chosen_set_no != game["mp_set_no"]:
-                game["mp_set_no"] = chosen_set_no
-                filename = f"{chosen_set_no:02d}.txt"
-                questions = await parse_question_file(page, filename)
-                if questions:
-                    game["questions"] = questions
-                    game["total"] = len(questions)
-                    game["set_name"] = filename.replace(".txt", "")
-                    game["current_question_index"] = -1
-                    game["main_pot"] = 0
-                    refresh_counter()
-                    refresh_pot()
-                    txt_question.value = (
-                        f"Zestaw {game['set_name']} został wybrany. "
-                        "Czekaj na wynik licytacji i pytanie."
-                    )
-                    txt_question.update()
+            # blokowanie odpowiedzi/podpowiedzi zgodnie z fazą
+            if phase == "answering":
+                if mp_state["player_id"] == answering_id:
+                    txt_answer.disabled = False
+                    btn_submit_answer.disabled = False
+                    btn_buy_abcd.disabled = False
+                    txt_feedback.value = "Twoja kolej na odpowiedź!"
+                else:
+                    txt_answer.disabled = True
+                    btn_submit_answer.disabled = True
+                    btn_buy_abcd.disabled = True
+                    btn_5050.disabled = True
+                    txt_feedback.value = "Ktoś inny odpowiada na pytanie."
+            else:
+                txt_answer.disabled = True
+                btn_submit_answer.disabled = True
+                btn_buy_abcd.disabled = True
+                btn_5050.disabled = True
+
+            txt_feedback.update()
+            txt_mp_timer.update()
+            txt_mp_pot.update()
 
             if mp_state["joined"]:
-                main_menu.visible = False
                 multiplayer_view.visible = True
                 game_view.visible = True
 
@@ -1308,7 +1243,6 @@ async def main(page: ft.Page):
         single_set_selector.visible = True
         multiplayer_view.visible = False
         game_view.visible = False
-        txt_question.value = ""
         page.update()
 
     def mode_multi_click(e):
@@ -1316,9 +1250,7 @@ async def main(page: ft.Page):
         single_set_selector.visible = False
         multiplayer_view.visible = True
         game_view.visible = True
-        txt_question.value = ""
         page.update()
-        # polling wystartuje też po mp_register, ale tutaj mamy podgląd
         page.run_task(mp_poll_state)
 
     btn_mode_single.on_click = mode_single_click
