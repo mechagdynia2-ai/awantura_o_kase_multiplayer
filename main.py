@@ -176,8 +176,7 @@ async def main(page: ft.Page):
         "total": 0,
         "set_name": "",
         "answer_submitted": False,
-        # multiplayer / wspólne:
-        "mp_set_no": None,
+        "mp_set_no": None,  # aktualny zestaw w multi
     }
 
     # -------------------- STAN MULTIPLAYER --------------------
@@ -225,7 +224,7 @@ async def main(page: ft.Page):
         text_align=ft.TextAlign.RIGHT,
     )
 
-    # "Pytanie X / XX (Zestaw XX)  PULA: XXX zł"
+    # "Pytanie X / XX (Zestaw XX)   PULA: XXX zł"
     txt_counter_left = ft.Text(
         "Pytanie 0 / 0 (Zestaw --)",
         size=15,
@@ -264,15 +263,16 @@ async def main(page: ft.Page):
 
     # -------------------- CZAT (BOX) --------------------
 
-    col_mp_chat = ft.Column(
-        [],
+    # ListView z auto_scroll – Flet zatrzymuje auto-scroll,
+    # gdy użytkownik sam przewinie w górę.
+    col_mp_chat = ft.ListView(
         spacing=2,
-        height=140,  # ~6 linijek
-        scroll=ft.ScrollMode.ALWAYS,
+        height=140,  # ok. 6 linii
+        auto_scroll=True,
     )
 
     txt_mp_chat = ft.TextField(
-        label="Napisz na czacie (komendy: 01–50 wybór zestawu)",
+        label="Napisz na czacie (admin: wpisz 01–50 aby wybrać zestaw)",
         multiline=False,
         dense=True,
         border_radius=8,
@@ -305,12 +305,6 @@ async def main(page: ft.Page):
         border=ft.border.all(1, "#e0e0e0"),
         bgcolor="white",
     )
-
-    def scroll_chat_bottom():
-        try:
-            col_mp_chat.scroll_to(offset=10000, duration=0)
-        except Exception:
-            pass
 
     # -------------------- ODPOWIEDŹ / PRZYCISKI --------------------
 
@@ -426,7 +420,6 @@ async def main(page: ft.Page):
         spacing=10,
     )
 
-    # nagłówek multiplayer nad czatem
     mp_header = ft.Column(
         [
             mp_join_row,
@@ -466,8 +459,8 @@ async def main(page: ft.Page):
         game["mp_set_no"] = None
         reset_game()
         main_menu.visible = False
-        multiplayer_view.visible = False
         game_view.visible = True
+        multiplayer_view.visible = False
         main_feedback.visible = False
         single_set_selector.visible = False
         txt_question.value = ""
@@ -545,23 +538,18 @@ async def main(page: ft.Page):
                 padding=ft.padding.only(left=16, right=16, top=4, bottom=4),
             ),
             ft.Container(txt_bonus, alignment=ft.alignment.center, padding=4),
-            # MULTIPLAYER header
             mp_header,
-            # CZAT
             chat_box,
-            # przyciski 50/50 i ABCD zaraz pod czatem
             ft.Container(
                 help_buttons_col,
                 alignment=ft.alignment.center,
                 padding=ft.padding.only(top=6, bottom=4),
             ),
-            # Pytanie
             ft.Container(
                 txt_question,
                 alignment=ft.alignment.center,
                 padding=ft.padding.only(left=16, right=16, top=4, bottom=4),
             ),
-            # Pole odpowiedzi + przycisk + pasek
             ft.Container(
                 answer_box,
                 alignment=ft.alignment.center,
@@ -912,7 +900,7 @@ async def main(page: ft.Page):
     # -------------------- FUNKCJE MULTIPLAYER --------------------
 
     def render_chat_from_state(chat_list: list[dict], players_state: list[dict]):
-        admin_names = {p["name"] for p in players_state if p.get("is_admin")}
+        admin_names = {p.get("name", "") for p in players_state if p.get("is_admin")}
         col_mp_chat.controls.clear()
 
         for m in chat_list:
@@ -980,7 +968,6 @@ async def main(page: ft.Page):
             )
 
         col_mp_chat.update()
-        scroll_chat_bottom()
 
     async def mp_register(e):
         name = (txt_mp_name.value or "").strip()
@@ -1019,15 +1006,12 @@ async def main(page: ft.Page):
 
         page.update()
 
-        # po dołączeniu – pobierz stan i ewentualnie wyświetl instrukcje BOTA
+        # po dołączeniu – sprawdź ilu jest graczy i ew. komunikat BOTA
         state = await fetch_json(f"{BACKEND_URL}/state", "GET")
         if state and isinstance(state, dict):
             players_list = state.get("players", [])
             player_count = len(players_list)
-            if (
-                mp_state["is_admin"]
-                and player_count >= 2
-            ):
+            if mp_state["is_admin"] and player_count >= 2:
                 await fetch_json(
                     f"{BACKEND_URL}/chat",
                     "POST",
@@ -1041,7 +1025,7 @@ async def main(page: ft.Page):
                     "POST",
                     {
                         "player": "BOT",
-                        "message": "Aby rozpocząć grę, wybierz zestaw pytań, wpisując cyfrę od 01 do 50 na czacie.",
+                        "message": "Aby rozpocząć grę, ADMIN wybiera zestaw pytań, wpisując cyfrę od 01 do 50 na czacie.",
                     },
                 )
 
@@ -1063,6 +1047,82 @@ async def main(page: ft.Page):
                 return
             mp_state["is_admin"] = resp.get("is_admin", mp_state["is_admin"])
 
+    async def mp_admin_select_set(n: int):
+        """
+        ADMIN wybiera zestaw n (1–50):
+        - ładuje pytania lokalnie
+        - wysyła BOT-komunikaty
+        - wywołuje /next_round
+        """
+        filename = f"{n:02d}.txt"
+        questions = await parse_question_file(page, filename)
+        if not questions:
+            txt_mp_status.value = (
+                f"Nie udało się załadować zestawu {filename}."
+            )
+            txt_mp_status.color = "red"
+            txt_mp_status.update()
+            return
+
+        game["questions"] = questions
+        game["total"] = len(questions)
+        game["set_name"] = filename.replace(".txt", "")
+        game["current_question_index"] = -1
+        game["main_pot"] = 0
+        game["mp_set_no"] = n
+
+        refresh_counter()
+        refresh_pot()
+
+        # BOT informuje wszystkich graczy
+        await fetch_json(
+            f"{BACKEND_URL}/chat",
+            "POST",
+            {
+                "player": "BOT",
+                "message": f"Zestaw pytań nr: {filename.replace('.txt', '')} został wybrany.",
+            },
+        )
+        await fetch_json(
+            f"{BACKEND_URL}/chat",
+            "POST",
+            {
+                "player": "BOT",
+                "message": "Gra rozpocznie się – odliczanie na czacie (20 s).",
+            },
+        )
+
+        # Opcjonalne „udawane” odliczanie co 5 s
+        async def countdown_task():
+            for left in [20, 15, 10, 5]:
+                await asyncio.sleep(5)
+                await fetch_json(
+                    f"{BACKEND_URL}/chat",
+                    "POST",
+                    {
+                        "player": "BOT",
+                        "message": f"Start za {left} s...",
+                    },
+                )
+
+            await fetch_json(
+                f"{BACKEND_URL}/chat",
+                "POST",
+                {
+                    "player": "BOT",
+                    "message": "Start! Rozpoczynamy licytację.",
+                },
+            )
+
+        page.run_task(countdown_task)
+
+        # nowa runda w backendzie
+        await fetch_json(f"{BACKEND_URL}/next_round", "POST", {})
+
+        txt_mp_status.value = f"Zestaw {filename} wybrany, trwa odliczanie."
+        txt_mp_status.color = "blue"
+        txt_mp_status.update()
+
     async def mp_send_chat(e):
         msg = (txt_mp_chat.value or "").strip()
         if not msg:
@@ -1073,6 +1133,23 @@ async def main(page: ft.Page):
             txt_mp_status.update()
             return
 
+        # ADMIN: jeśli wpisał tylko liczbę, traktujemy to jako komendę wyboru zestawu
+        if mp_state["is_admin"] and msg.isdigit():
+            raw_val = msg.lstrip("0")
+            if raw_val == "":
+                raw_val = "0"
+            try:
+                n = int(raw_val)
+            except ValueError:
+                n = 0
+            if 1 <= n <= 50:
+                # nie wysyłamy numeru jako zwykła wiadomość – zamiast tego uruchamiamy logikę wyboru
+                txt_mp_chat.value = ""
+                txt_mp_chat.update()
+                await mp_admin_select_set(n)
+                return
+
+        # zwykła wiadomość czatu
         name = mp_state["player_name"] or "Anonim"
         await fetch_json(
             f"{BACKEND_URL}/chat",
@@ -1139,7 +1216,7 @@ async def main(page: ft.Page):
     async def mp_poll_state():
         """
         Pętla: pobiera stan, odświeża UI, wykrywa zmiany graczy
-        i wykrywa wybór zestawu (admin wpisuje np. '07' na czacie).
+        i wybór zestawu na podstawie BOT-komunikatu.
         """
         while True:
             data = await fetch_json(f"{BACKEND_URL}/state", "GET")
@@ -1154,7 +1231,7 @@ async def main(page: ft.Page):
             players_list = data.get("players", [])
             chat_list = data.get("chat", [])
 
-            # wykrywanie, że ktoś wyszedł (tylko admin wysyła BOTA, żeby nie dublować)
+            # wykrywanie, że ktoś wyszedł – tylko ADMIN wysyła BOT-a, żeby się nie powielało
             current_names = {p.get("name", "?") for p in players_list}
             if mp_state["is_admin"] and mp_state["known_players"]:
                 left = mp_state["known_players"] - current_names
@@ -1172,40 +1249,43 @@ async def main(page: ft.Page):
             # render czatu
             render_chat_from_state(chat_list, players_list)
 
-            # wykrycie admina i wyboru zestawu (komenda: 01–50 lub 1–50)
-            admin_names = {p["name"] for p in players_list if p.get("is_admin")}
+            # wykrycie wyboru zestawu na podstawie BOTA:
+            # "Zestaw pytań nr: XX został wybrany."
             chosen_set_no = None
             for m in chat_list:
-                player_name = m.get("player", "")
-                msg_text = (m.get("message", "") or "").strip()
-                if player_name in admin_names and msg_text.isdigit():
-                    raw_val = msg_text.lstrip("0")
-                    if raw_val == "":
-                        continue
+                if m.get("player") != "BOT":
+                    continue
+                text = (m.get("message") or "").strip()
+                m2 = re.search(
+                    r"Zestaw pytań nr:\s*(\d{1,2})",
+                    text,
+                    re.IGNORECASE,
+                )
+                if m2:
                     try:
-                        n = int(raw_val)
+                        n = int(m2.group(1))
                     except ValueError:
                         continue
                     if 1 <= n <= 50:
                         chosen_set_no = n
 
-            # jeśli znaleziono nowy zestaw – wczytaj pytania na KAŻDYM kliencie
             if chosen_set_no is not None and chosen_set_no != game["mp_set_no"]:
                 game["mp_set_no"] = chosen_set_no
                 filename = f"{chosen_set_no:02d}.txt"
                 questions = await parse_question_file(page, filename)
-                game["questions"] = questions
-                game["total"] = len(questions)
-                game["set_name"] = filename.replace(".txt", "")
-                game["current_question_index"] = -1
-                game["main_pot"] = 0
-                refresh_counter()
-                refresh_pot()
-                txt_question.value = (
-                    f"Zestaw {game['set_name']} wybrany. "
-                    "Czekaj na wynik licytacji i pytanie."
-                )
-                txt_question.update()
+                if questions:
+                    game["questions"] = questions
+                    game["total"] = len(questions)
+                    game["set_name"] = filename.replace(".txt", "")
+                    game["current_question_index"] = -1
+                    game["main_pot"] = 0
+                    refresh_counter()
+                    refresh_pot()
+                    txt_question.value = (
+                        f"Zestaw {game['set_name']} został wybrany. "
+                        "Czekaj na wynik licytacji i pytanie."
+                    )
+                    txt_question.update()
 
             if mp_state["joined"]:
                 main_menu.visible = False
@@ -1238,7 +1318,7 @@ async def main(page: ft.Page):
         game_view.visible = True
         txt_question.value = ""
         page.update()
-        # polling wystartuje też po mp_register, ale tu może być "podgląd"
+        # polling wystartuje też po mp_register, ale tutaj mamy podgląd
         page.run_task(mp_poll_state)
 
     btn_mode_single.on_click = mode_single_click
