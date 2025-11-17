@@ -973,70 +973,76 @@ async def main(page: ft.Page):
     # -------------------- FUNKCJE MULTIPLAYER --------------------
 
     def render_chat_from_state(chat_list: list[dict], players_state: list[dict]):
-        admin_names = {p["name"] for p in players_state if p.get("is_admin")}
-        col_mp_chat.controls.clear()
+       admin_names = {p["name"] for p in players_state if p.get("is_admin")}
+       col_mp_chat.controls.clear()
 
-        for m in chat_list:
-            player_name = m.get("player", "?")
-            msg_text = m.get("message", "")
-            is_bot = player_name == "BOT"
+       for m in chat_list:
+        player_name = m.get("player", "?")
+        msg_text = m.get("message", "")
+        is_bot = player_name == "BOT"
 
-            spans: list[ft.TextSpan] = []
-            if is_bot:
-                spans.append(
-                    ft.TextSpan(
-                        "BOT: ",
-                        style=ft.TextStyle(
-                            color="black", weight=ft.FontWeight.BOLD, size=12
-                        ),
+        spans: list[ft.TextSpan] = []
+
+        if is_bot:
+            spans.append(
+                ft.TextSpan(
+                    "BOT: ",
+                    ft.TextStyle(
+                        color="black",
+                        weight=ft.FontWeight.BOLD,
+                        size=12
                     )
                 )
+            )
+            spans.append(
+                ft.TextSpan(
+                    msg_text,
+                    ft.TextStyle(color="black", size=12)
+                )
+            )
+        else:
+             is_admin = player_name in admin_names
+             if is_admin:
                 spans.append(
                     ft.TextSpan(
-                        msg_text,
-                        style=ft.TextStyle(color="black", size=12),
-                    )
-                )
-            else:
-                is_admin = player_name in admin_names
-                if is_admin:
-                    spans.append(
-                        ft.TextSpan(
-                            "[ADMIN] ",
-                            style=ft.TextStyle(
-                                color="red",
-                                weight=ft.FontWeight.BOLD,
-                                size=12,
-                            ),
+                        "[ADMIN] ",
+                        ft.TextStyle(
+                            color="red",
+                            weight=ft.FontWeight.BOLD,
+                            size=12
                         )
                     )
-                name_color = name_to_color(player_name)
-                spans.append(
-                    ft.TextSpan(
-                        f"{player_name}: ",
-                        style=ft.TextStyle(
-                            color=name_color,
-                            weight=ft.FontWeight.BOLD,
-                            size=12,
-                        ),
-                    )
-                )
-                spans.append(
-                    ft.TextSpan(
-                        msg_text,
-                        style=ft.TextStyle(color="black", size=12),
-                    )
                 )
 
-            col_mp_chat.controls.append(
-                ft.RichText(
-                    spans=spans,
-                    max_lines=2,
-                    overflow=ft.TextOverflow.ELLIPSIS,
+                name_color = name_to_color(player_name)
+                spans.append(
+                ft.TextSpan(
+                    f"{player_name}: ",
+                    ft.TextStyle(
+                        color=name_color,
+                        weight=ft.FontWeight.BOLD,
+                        size=12
+                    )
                 )
             )
 
-        col_mp_chat.update()
+                spans.append(
+                    ft.TextSpan(
+                        msg_text,
+                        ft.TextStyle(color="black", size=12)
+                )
+            )
+
+                col_mp_chat.controls.append(
+                ft.Text(
+                   spans=spans,
+                    max_lines=3,
+                   overflow=ft.TextOverflow.ELLIPSIS
+            )
+        )
+
+       col_mp_chat.update()
+
 
     async def mp_register(e):
         name = (txt_mp_name.value or "").strip()
