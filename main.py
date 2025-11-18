@@ -1188,8 +1188,8 @@ async def main(page: ft.Page):
 
         page.update()
 
-        page.run_task(mp_heartbeat_loop())
-        page.run_task(mp_poll_state())
+        page.run_task(mp_heartbeat_loop)
+        page.run_task(mp_poll_state)
 
     async def mp_heartbeat_loop():
         while mp_state["player_id"]:
