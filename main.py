@@ -335,7 +335,7 @@ async def main(page: ft.Page):
             bidding_col,
         ],
         spacing=6,
-        horizontal_alignment=ft.MainAxisAlignment.STRETCH,
+        horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
     )
 
     page.add(layout)
