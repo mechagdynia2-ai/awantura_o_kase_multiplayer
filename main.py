@@ -59,6 +59,9 @@ class GameState:
     current_round_id: Optional[str] = None
     bidding_fee_paid_for_round: Optional[str] = None
     abcd_bought_this_round: bool = False
+    
+    # Techniczne
+    last_chat_timestamp: float = 0.0
 
 # ----------------- WARSTWA SIECIOWA -----------------
 
@@ -104,7 +107,8 @@ async def send_bot_message(msg: str):
 def normalize_answer(text: Optional[str]) -> str:
     if not text: return ""
     s = str(text).lower().strip()
-    trans = str.maketrans("ółżź.ćńśąęü", "olzzcnsaeu")
+    # NAPRAWIONO: Usunięto kropkę z pierwszego ciągu, aby długości się zgadzały (10 znaków vs 10 znaków)
+    trans = str.maketrans("ółżźćńśąęü", "olzzcnsaeu")
     s = s.translate(trans)
     s = unicodedata.normalize("NFKD", s)
     s = "".join(ch for ch in s if not unicodedata.combining(ch))
@@ -237,9 +241,16 @@ async def main(page: ft.Page):
 
     async def render_chat(chat_list: list[dict], players_state: list[dict]):
         if not chat_list: return
-        current_len = len(col_chat.controls)
-        # Proste sprawdzenie, aby nie przerysowywać ciągle tego samego
-        if len(chat_list) == current_len: return
+        
+        # NAPRAWIONO: Sprawdzamy timestamp ostatniej wiadomości zamiast długości listy.
+        # Dzięki temu, gdy lista jest pełna (30 msg) i przychodzi nowa, czat się odświeży.
+        last_msg = chat_list[-1]
+        last_ts = last_msg.get("timestamp", 0)
+        
+        if last_ts == state.last_chat_timestamp:
+            return # Brak nowych wiadomości
+            
+        state.last_chat_timestamp = last_ts
 
         col_chat.controls.clear()
         admin_names = {p["name"] for p in players_state if p.get("is_admin")}
@@ -251,8 +262,10 @@ async def main(page: ft.Page):
             spans = []
 
             if is_bot:
-                color = "#123499" if msg_text.startswith("PYTANIE:") else "black"
-                weight = "bold" if msg_text.startswith("PYTANIE:") else "normal"
+                # Kolorowanie pytań na niebiesko
+                is_question = msg_text.startswith("PYTANIE:")
+                color = "#123499" if is_question else "black"
+                weight = "bold" if is_question else "normal"
                 spans.append(ft.TextSpan(f"BOT: {msg_text}", ft.TextStyle(color=color, weight=weight, size=12)))
             else:
                 if player_name in admin_names:
@@ -378,7 +391,6 @@ async def main(page: ft.Page):
         if res and res.get("status") == "ok":
             state.local_money = 0 if kind == "allin" else (state.local_money - cost)
             refresh_local_money()
-            # --- POPRAWKA 1: Wyświetl informację o licytacji na czacie ---
             msg_bid = f"Gracz {state.player_name} podbija stawkę o {cost} zł!" if kind == "normal" else f"Gracz {state.player_name} wchodzi VA BANQUE!"
             await send_bot_message(msg_bid)
 
@@ -427,138 +439,150 @@ async def main(page: ft.Page):
         if not state.is_admin or not (0 <= state.current_q_index < len(state.questions)):
             return
 
-        q = state.questions[state.current_q_index]
-        user_ans = normalize_answer(state.current_answer_text)
-        correct_ans = normalize_answer(q["correct"])
-        ratio = fuzz.ratio(user_ans, correct_ans)
-        
-        win_amt = state.current_round_pot
-        winner = state.answering_player_name
+        try:
+            q = state.questions[state.current_q_index]
+            user_ans = normalize_answer(state.current_answer_text)
+            correct_ans = normalize_answer(q["correct"])
+            
+            # Bezpieczne sprawdzanie podobieństwa
+            ratio = fuzz.ratio(user_ans, correct_ans)
+            
+            win_amt = state.current_round_pot
+            winner = state.answering_player_name
 
-        if ratio >= 80:
-            if winner == state.player_name:
-                state.local_money += win_amt
-                refresh_local_money()
-            await send_bot_message(f"TAK! Odpowiedź prawidłowa ({ratio}%). {winner} zgarnia {win_amt} zł!")
-            state.carryover_pot = 0
-        else:
-            await send_bot_message(f"NIE! Prawidłowa to: {q['correct']}. Pula przechodzi dalej.")
-            state.carryover_pot = win_amt
+            if ratio >= 80:
+                if winner == state.player_name:
+                    state.local_money += win_amt
+                    refresh_local_money()
+                await send_bot_message(f"TAK! Odpowiedź prawidłowa ({ratio}%). {winner} zgarnia {win_amt} zł!")
+                state.carryover_pot = 0
+            else:
+                await send_bot_message(f"NIE! Prawidłowa to: {q['correct']}. Pula przechodzi dalej.")
+                state.carryover_pot = win_amt
 
-        next_idx = state.current_q_index + 1
-        if next_idx >= len(state.questions):
-            await send_bot_message("Koniec zestawu! Dzięki za grę.")
+            next_idx = state.current_q_index + 1
+            if next_idx >= len(state.questions):
+                await send_bot_message("Koniec zestawu! Dzięki za grę.")
+                state.local_phase = "idle"
+                return
+
+            state.current_q_index = next_idx
+            state.local_phase = "countdown"
+            state.countdown_until = time.time() + 20.0
+            state.current_answer_text = ""
+            state.verdict_sent = False
+            state.abcd_bought_this_round = False
+            state.hints_extra = 0
+            
+            txt_round_info.value = f"Pytanie {next_idx+1} / {len(state.questions)}"
+            txt_round_info.update()
+            await send_bot_message("Za 20 sekund start kolejnej licytacji!")
+            
+        except Exception as e:
+            print(f"Error in detect_verdict_logic: {e}")
+            # Reset awaryjny, żeby gra nie wisiała
             state.local_phase = "idle"
-            return
-
-        state.current_q_index = next_idx
-        state.local_phase = "countdown"
-        state.countdown_until = time.time() + 20.0
-        state.current_answer_text = ""
-        state.verdict_sent = False
-        state.abcd_bought_this_round = False
-        state.hints_extra = 0
-        
-        txt_round_info.value = f"Pytanie {next_idx+1} / {len(state.questions)}"
-        txt_round_info.update()
-        await send_bot_message("Za 20 sekund start kolejnej licytacji!")
 
     # ----------------- GAME LOOP -----------------
 
     async def game_loop():
         while state.joined:
-            data = await fetch_json(f"{BACKEND_URL}/state")
-            if data:
-                state.current_round_id = data.get("round_id")
-                backend_phase = data.get("phase")
-                state.backend_pot = data.get("pot", 0)
-                
-                txt_timer.value = f"Czas serwera: {int(data.get('time_left', 0))} s"
-                txt_timer.update()
-                
-                await render_chat(data.get("chat", []), data.get("players", []))
-                await process_chat_commands(data.get("chat", []), data.get("players", []))
-                refresh_pot_label()
-
-                # Heartbeat
-                my_p = next((p for p in data.get("players", []) if p["id"] == state.player_id), None)
-                if my_p:
-                    state.is_admin = my_p.get("is_admin", False)
-                    await fetch_json(f"{BACKEND_URL}/heartbeat", "POST", {"player_id": state.player_id})
-
-                now = time.time()
-
-                # --- PHASE: COUNTDOWN ---
-                if state.local_phase == "countdown":
-                    remain = int(state.countdown_until - now)
-                    set_phase_info(f"Licytacja za: {max(0, remain)} s", "blue")
-                    if remain <= 0:
-                        state.local_phase = "bidding"
-                        if state.is_admin:
-                            await fetch_json(f"{BACKEND_URL}/next_round", "POST", {})
-                            await send_bot_message("START LICYTACJI!")
-
-                # --- PHASE: BIDDING ---
-                elif state.local_phase == "bidding":
-                    is_bidding = (backend_phase == "bidding")
-                    if btn_bid.disabled != (not is_bidding):
-                        btn_bid.disabled = not is_bidding
-                        btn_all_in.disabled = not is_bidding
-                        btn_finish_bidding.disabled = not is_bidding
-                        btn_bid.update()
-                        btn_all_in.update()
-                        btn_finish_bidding.update()
-
-                    if state.current_round_id and state.bidding_fee_paid_for_round != state.current_round_id:
-                        state.local_money -= ENTRY_FEE
-                        state.bidding_fee_paid_for_round = state.current_round_id
-                        refresh_local_money()
-
-                    # Przejście do answering
-                    if backend_phase == "answering":
-                        state.local_phase = "answering_wait"
-                        state.answering_player_id = data.get("answering_player_id")
-                        state.answer_deadline = now + BASE_ANSWER_TIME
-                        winner_name = next((p["name"] for p in data.get("players", []) if p["id"] == state.answering_player_id), "?")
-                        state.answering_player_name = winner_name
-                        
-                        # --- POPRAWKA 2: Wyświetlanie pytania na czacie (tylko Admin) ---
-                        if state.is_admin:
-                            await send_bot_message(f"Licytację wygrał: {winner_name}")
-                            if 0 <= state.current_q_index < len(state.questions):
-                                q_text = state.questions[state.current_q_index]["question"]
-                                await send_bot_message(f"PYTANIE: {q_text}")
-                            else:
-                                await send_bot_message("Błąd: Brak pytania w bazie.")
-
-                        im_winner = (state.player_id == state.answering_player_id)
-                        btn_hint_abcd.disabled = not im_winner
-                        btn_hint_5050.disabled = not im_winner
-                        btn_hint_abcd.update()
-                        btn_hint_5050.update()
-
-                # --- PHASE: ANSWERING WAIT ---
-                elif state.local_phase == "answering_wait":
-                    remain = int(state.answer_deadline - now)
-                    set_phase_info(f"Odpowiada {state.answering_player_name}: {max(0, remain)} s", "green")
+            try:
+                data = await fetch_json(f"{BACKEND_URL}/state")
+                if data:
+                    state.current_round_id = data.get("round_id")
+                    backend_phase = data.get("phase")
+                    state.backend_pot = data.get("pot", 0)
                     
-                    if remain <= 0 and not state.current_answer_text:
-                        state.current_answer_text = ""
-                        state.local_phase = "discussion"
-                        state.discussion_until = now + 20.0
-                        if state.is_admin:
-                            await send_bot_message("Czas minął! Brak odpowiedzi. Dyskusja 20s.")
+                    txt_timer.value = f"Czas serwera: {int(data.get('time_left', 0))} s"
+                    txt_timer.update()
+                    
+                    await render_chat(data.get("chat", []), data.get("players", []))
+                    await process_chat_commands(data.get("chat", []), data.get("players", []))
+                    refresh_pot_label()
 
-                # --- PHASE: DISCUSSION ---
-                elif state.local_phase == "discussion":
-                    remain = int(state.discussion_until - now)
-                    set_phase_info(f"Dyskusja: {max(0, remain)} s", "orange")
-                    if remain <= 0 and not state.verdict_sent:
-                        state.verdict_sent = True
-                        state.local_phase = "verdict"
-                        if state.is_admin:
-                            await detect_verdict_logic()
+                    # Heartbeat
+                    my_p = next((p for p in data.get("players", []) if p["id"] == state.player_id), None)
+                    if my_p:
+                        state.is_admin = my_p.get("is_admin", False)
+                        await fetch_json(f"{BACKEND_URL}/heartbeat", "POST", {"player_id": state.player_id})
 
+                    now = time.time()
+
+                    # --- PHASE: COUNTDOWN ---
+                    if state.local_phase == "countdown":
+                        remain = int(state.countdown_until - now)
+                        set_phase_info(f"Licytacja za: {max(0, remain)} s", "blue")
+                        if remain <= 0:
+                            state.local_phase = "bidding"
+                            if state.is_admin:
+                                await fetch_json(f"{BACKEND_URL}/next_round", "POST", {})
+                                await send_bot_message("START LICYTACJI!")
+
+                    # --- PHASE: BIDDING ---
+                    elif state.local_phase == "bidding":
+                        is_bidding = (backend_phase == "bidding")
+                        if btn_bid.disabled != (not is_bidding):
+                            btn_bid.disabled = not is_bidding
+                            btn_all_in.disabled = not is_bidding
+                            btn_finish_bidding.disabled = not is_bidding
+                            btn_bid.update()
+                            btn_all_in.update()
+                            btn_finish_bidding.update()
+
+                        if state.current_round_id and state.bidding_fee_paid_for_round != state.current_round_id:
+                            state.local_money -= ENTRY_FEE
+                            state.bidding_fee_paid_for_round = state.current_round_id
+                            refresh_local_money()
+
+                        # Przejście do answering
+                        if backend_phase == "answering":
+                            state.local_phase = "answering_wait"
+                            state.answering_player_id = data.get("answering_player_id")
+                            state.answer_deadline = now + BASE_ANSWER_TIME
+                            winner_name = next((p["name"] for p in data.get("players", []) if p["id"] == state.answering_player_id), "?")
+                            state.answering_player_name = winner_name
+                            
+                            # Wyświetlanie pytania na czacie (tylko Admin)
+                            if state.is_admin:
+                                await send_bot_message(f"Licytację wygrał: {winner_name}")
+                                if 0 <= state.current_q_index < len(state.questions):
+                                    q_text = state.questions[state.current_q_index]["question"]
+                                    await send_bot_message(f"PYTANIE: {q_text}")
+                                else:
+                                    await send_bot_message("Błąd: Brak pytania w bazie.")
+
+                            im_winner = (state.player_id == state.answering_player_id)
+                            btn_hint_abcd.disabled = not im_winner
+                            btn_hint_5050.disabled = not im_winner
+                            btn_hint_abcd.update()
+                            btn_hint_5050.update()
+
+                    # --- PHASE: ANSWERING WAIT ---
+                    elif state.local_phase == "answering_wait":
+                        remain = int(state.answer_deadline - now)
+                        set_phase_info(f"Odpowiada {state.answering_player_name}: {max(0, remain)} s", "green")
+                        
+                        if remain <= 0 and not state.current_answer_text:
+                            state.current_answer_text = ""
+                            state.local_phase = "discussion"
+                            state.discussion_until = now + 20.0
+                            if state.is_admin:
+                                await send_bot_message("Czas minął! Brak odpowiedzi. Dyskusja 20s.")
+
+                    # --- PHASE: DISCUSSION ---
+                    elif state.local_phase == "discussion":
+                        remain = int(state.discussion_until - now)
+                        set_phase_info(f"Dyskusja: {max(0, remain)} s", "orange")
+                        if remain <= 0 and not state.verdict_sent:
+                            state.verdict_sent = True
+                            state.local_phase = "verdict"
+                            if state.is_admin:
+                                await detect_verdict_logic()
+            
+            except Exception as loop_ex:
+                print(f"Loop error: {loop_ex}")
+            
             await asyncio.sleep(1.0)
 
     # --- BINDOWANIE AKCJI ---
