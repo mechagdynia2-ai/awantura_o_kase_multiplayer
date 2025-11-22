@@ -4,7 +4,6 @@ import json
 import re
 from dataclasses import dataclass
 
-# Obsługa Pyodide (przeglądarka)
 try:
     import js
     from js import fetch
@@ -28,8 +27,6 @@ class GameState:
     
     answering_player_id: str = None
     last_chat_ts: float = 0.0
-    
-    # Flaga z serwera, czy w tej rundzie kupiono ABCD
     server_abcd_bought: bool = False
 
 async def fetch_json(url: str, method: str = "GET", body: dict = None):
@@ -53,50 +50,50 @@ async def main(page: ft.Page):
     page.theme_mode = ft.ThemeMode.LIGHT
     state = GameState()
 
-    # Kontrolki
-    txt_info = ft.Text("Witaj w grze!", size=16, weight="bold")
+    # --- Elementy UI (zoptymalizowane pod mobile) ---
+    
     txt_money = ft.Text("Kasa: ---", color="green", weight="bold")
     txt_pot = ft.Text("Pula: 0 zł", color="purple", weight="bold")
-    txt_timer = ft.Text("-- s")
+    txt_timer = ft.Text("-- s", size=16, weight="bold")
     
-    chat_col = ft.Column(scroll="auto", auto_scroll=True, height=250)
-    input_chat = ft.TextField(hint_text="Wpisz wiadomość...", expand=True, disabled=True)
+    # Czat (zwiększony, bo usunęliśmy nagłówki)
+    chat_col = ft.Column(scroll="auto", auto_scroll=True, height=300)
+    input_chat = ft.TextField(hint_text="Wiadomość...", expand=True, disabled=True, dense=True)
     btn_send = ft.FilledButton("Wyślij", disabled=True)
     
-    # Przyciski gry
-    btn_bid = ft.FilledButton("Podbij (+100)", disabled=True)
-    btn_pass = ft.ElevatedButton("Pasuję", disabled=True)
-    btn_allin = ft.FilledButton("VA BANQUE", style=ft.ButtonStyle(bgcolor="red"), disabled=True)
+    # Przyciski licytacji
+    btn_bid = ft.FilledButton("+100", disabled=True, expand=1)
+    btn_pass = ft.ElevatedButton("Pas", disabled=True, expand=1)
+    btn_allin = ft.FilledButton("VA BANQUE", style=ft.ButtonStyle(bgcolor="red"), disabled=True, expand=1)
     
-    btn_abcd = ft.OutlinedButton("ABCD (losowy koszt)", disabled=True)
-    btn_5050 = ft.OutlinedButton("50/50 (losowy koszt)", disabled=True)
+    # Przyciski podpowiedzi
+    btn_abcd = ft.OutlinedButton("ABCD", disabled=True, expand=1)
+    btn_5050 = ft.OutlinedButton("50/50", disabled=True, expand=1)
     
-    # Login - definiujemy zmienną wcześniej, aby uniknąć błędu z ID
-    input_name = ft.TextField(label="Nick")
+    # Login
+    input_name = ft.TextField(label="Nick", expand=True)
     btn_join = ft.FilledButton("Dołącz")
-    
-    # --- POPRAWKA TUTAJ ---
-    # Tworzymy obiekt Row i przypisujemy do zmiennej, bez parametru id
     row_login = ft.Row([input_name, btn_join], alignment="center")
-    # ----------------------
 
     layout = ft.Column([
-        ft.Text("AWANTURA O KASĘ", size=24, weight="bold"),
-        row_login, # Dodajemy zmienną
-        ft.Divider(),
+        ft.Text("AWANTURA O KASĘ", size=20, weight="bold", text_align="center"),
+        row_login,
+        ft.Divider(height=5),
+        
+        # Pasek statusu
         ft.Row([txt_money, txt_pot, txt_timer], alignment="spaceBetween"),
-        ft.Container(txt_info, bgcolor="blue_50", padding=10, border_radius=5, alignment=ft.alignment.center),
+        
+        # Czat
         ft.Container(
             content=ft.Column([chat_col, ft.Row([input_chat, btn_send])]),
-            border=ft.border.all(1, "grey"), border_radius=10, padding=5, height=350
+            border=ft.border.all(1, "grey"), border_radius=10, padding=5,
+            expand=True # Rozciągnij czat, żeby zajął dostępne miejsce
         ),
-        ft.Divider(),
-        ft.Text("Podpowiedzi (Tylko dla odpowiadającego):"),
-        ft.Row([btn_abcd, btn_5050], alignment="center"),
-        ft.Divider(),
-        ft.Text("Licytacja:"),
-        ft.Row([btn_bid, btn_pass, btn_allin], alignment="center")
-    ])
+        
+        # Sekcja przycisków (ciasno upakowana)
+        ft.Row([btn_abcd, btn_5050], spacing=5),
+        ft.Row([btn_bid, btn_pass, btn_allin], spacing=5)
+    ], spacing=5, expand=True) # Cały layout rozciągliwy
     
     page.add(layout)
 
@@ -119,7 +116,7 @@ async def main(page: ft.Page):
                 if "PYTANIE:" in m: color = "navy"
             elif "[ADMIN]" in p: color = "red"
             
-            chat_col.controls.append(ft.Text(f"{p}: {m}", color=color, selectable=True))
+            chat_col.controls.append(ft.Text(f"{p}: {m}", color=color, selectable=True, size=12))
         chat_col.update()
 
     async def game_loop():
@@ -127,13 +124,6 @@ async def main(page: ft.Page):
             try:
                 data = await fetch_json(f"{BACKEND_URL}/state")
                 if data:
-                    # Info o rundzie
-                    q_idx = data.get("current_question_index", -1)
-                    if q_idx >= 0:
-                        txt_info.value = f"Pytanie {q_idx + 1}/50"
-                    else:
-                        txt_info.value = "Oczekiwanie na start..."
-                    
                     # Czas i Pula
                     txt_timer.value = f"{int(data.get('time_left',0))} s"
                     pot_val = data.get("pot", 0)
@@ -144,36 +134,31 @@ async def main(page: ft.Page):
                     state.answering_player_id = data.get("answering_player_id")
                     state.server_abcd_bought = data.get("abcd_bought", False)
 
-                    # Update gracza (kasa)
+                    # Update gracza
                     me = next((p for p in data.get("players",[]) if p["id"] == state.player_id), None)
                     if me:
                         state.is_admin = me.get("is_admin", False)
                         state.local_money = me.get("money", 0)
-                        txt_money.value = f"Kasa: {state.local_money} zł"
+                        txt_money.value = f"{state.local_money} zł"
                         txt_pot.value = f"Pula: {pot_val} zł"
-
                         await fetch_json(f"{BACKEND_URL}/heartbeat", "POST", {"player_id": state.player_id})
 
-                    # Obsługa Przycisków
+                    # Przyciski
                     is_my_turn_ans = (phase == "answering" and state.answering_player_id == state.player_id)
                     is_bidding = (phase == "bidding")
                     
-                    # Licytacja
                     btn_bid.disabled = not is_bidding
                     btn_pass.disabled = not is_bidding
                     btn_allin.disabled = not is_bidding
                     
-                    # Podpowiedzi
                     btn_abcd.disabled = not is_my_turn_ans
                     btn_5050.disabled = not (is_my_turn_ans and state.server_abcd_bought)
 
                     page.update()
-                    
                     await render_chat(data.get("chat", []))
                     
-                    # Wybór zestawu (prosta logika komend dla admina)
+                    # Komendy admina
                     if state.is_admin and phase == "idle":
-                        # Logika parsowania komend admina jest w on_send_chat
                         pass
 
             except Exception as e:
@@ -191,10 +176,7 @@ async def main(page: ft.Page):
             state.player_id = res["id"]
             state.player_name = res["name"]
             state.joined = True
-            
-            # Ukrywamy wiersz logowania używając zmiennej
             row_login.visible = False
-            
             input_chat.disabled = False
             btn_send.disabled = False
             page.run_task(game_loop)
@@ -204,14 +186,10 @@ async def main(page: ft.Page):
         msg = input_chat.value
         if not msg: return
         
-        # Jeśli moja kolej na odpowiedź -> wyślij jako odpowiedź
         if state.local_phase == "answering" and state.answering_player_id == state.player_id:
             await fetch_json(f"{BACKEND_URL}/answer", "POST", {"player_id": state.player_id, "answer": msg})
-        
-        # Jeśli jestem adminem i faza idle i wpisałem numer -> wybierz zestaw
         elif state.is_admin and state.local_phase == "idle" and re.fullmatch(r"\d+", msg):
             await fetch_json(f"{BACKEND_URL}/select_set", "POST", {"player_id": state.player_id, "set_no": int(msg)})
-        
         else:
             await fetch_json(f"{BACKEND_URL}/chat", "POST", {"player": state.player_name, "message": msg})
         
@@ -238,7 +216,6 @@ async def main(page: ft.Page):
     btn_bid.on_click = do_bid
     btn_pass.on_click = do_pass
     btn_allin.on_click = do_allin
-    
     btn_abcd.on_click = do_hint_abcd
     btn_5050.on_click = do_hint_5050
 
