@@ -13,8 +13,6 @@ except ImportError:
 
 BACKEND_URL = "https://game-multiplayer-qfn1.onrender.com"
 
-# ----------------- STATE -----------------
-
 @dataclass
 class GameState:
     player_id: str = None
@@ -26,8 +24,18 @@ class GameState:
     local_phase: str = "idle"
     
     answering_player_id: str = None
-    last_chat_ts: float = 0.0
     server_abcd_bought: bool = False
+
+# Paleta ciemnych kolorów dla graczy
+PLAYER_COLORS = [
+    "#2E7D32", "#C62828", "#AD1457", "#6A1B9A", 
+    "#283593", "#0277BD", "#00695C", "#558B2F", 
+    "#9E9D24", "#EF6C00", "#D84315", "#4E342E", 
+    "#424242", "#37474F"
+]
+
+def get_player_color(name: str) -> str:
+    return PLAYER_COLORS[abs(hash(name)) % len(PLAYER_COLORS)]
 
 async def fetch_json(url: str, method: str = "GET", body: dict = None):
     if not js: return None
@@ -43,34 +51,27 @@ async def fetch_json(url: str, method: str = "GET", body: dict = None):
         print(f"Err {url}: {e}")
         return None
 
-# ----------------- UI -----------------
-
 async def main(page: ft.Page):
     page.title = "Awantura o Kasę"
     page.theme_mode = ft.ThemeMode.LIGHT
     state = GameState()
 
-    # --- Elementy UI (zoptymalizowane pod mobile) ---
-    
+    # UI Elements
     txt_money = ft.Text("Kasa: ---", color="green", weight="bold")
     txt_pot = ft.Text("Pula: 0 zł", color="purple", weight="bold")
     txt_timer = ft.Text("-- s", size=16, weight="bold")
     
-    # Czat (zwiększony, bo usunęliśmy nagłówki)
     chat_col = ft.Column(scroll="auto", auto_scroll=True, height=300)
     input_chat = ft.TextField(hint_text="Wiadomość...", expand=True, disabled=True, dense=True)
     btn_send = ft.FilledButton("Wyślij", disabled=True)
     
-    # Przyciski licytacji
     btn_bid = ft.FilledButton("+100", disabled=True, expand=1)
     btn_pass = ft.ElevatedButton("Pas", disabled=True, expand=1)
     btn_allin = ft.FilledButton("VA BANQUE", style=ft.ButtonStyle(bgcolor="red"), disabled=True, expand=1)
     
-    # Przyciski podpowiedzi
     btn_abcd = ft.OutlinedButton("ABCD", disabled=True, expand=1)
     btn_5050 = ft.OutlinedButton("50/50", disabled=True, expand=1)
     
-    # Login
     input_name = ft.TextField(label="Nick", expand=True)
     btn_join = ft.FilledButton("Dołącz")
     row_login = ft.Row([input_name, btn_join], alignment="center")
@@ -79,44 +80,61 @@ async def main(page: ft.Page):
         ft.Text("AWANTURA O KASĘ", size=20, weight="bold", text_align="center"),
         row_login,
         ft.Divider(height=5),
-        
-        # Pasek statusu
         ft.Row([txt_money, txt_pot, txt_timer], alignment="spaceBetween"),
-        
-        # Czat
         ft.Container(
             content=ft.Column([chat_col, ft.Row([input_chat, btn_send])]),
             border=ft.border.all(1, "grey"), border_radius=10, padding=5,
-            expand=True # Rozciągnij czat, żeby zajął dostępne miejsce
+            expand=True
         ),
-        
-        # Sekcja przycisków (ciasno upakowana)
         ft.Row([btn_abcd, btn_5050], spacing=5),
         ft.Row([btn_bid, btn_pass, btn_allin], spacing=5)
-    ], spacing=5, expand=True) # Cały layout rozciągliwy
+    ], spacing=5, expand=True)
     
     page.add(layout)
 
-    # --- LOGIKA ---
-
-    async def render_chat(chat_list):
+    async def render_chat(chat_list, players_list):
         if not chat_list: return
-        last = chat_list[-1]
-        if last.get("timestamp") == state.last_chat_ts: return
         
-        state.last_chat_ts = last.get("timestamp")
+        # Znajdź adminów
+        admin_names = {p["name"] for p in players_list if p.get("is_admin")}
+
+        # Czyścimy i rysujemy od nowa (bezpieczniej dla 1. pytania)
         chat_col.controls.clear()
         
         for msg in chat_list:
-            p = msg.get("player","")
-            m = msg.get("message","")
-            color = "black"
-            if p == "BOT": 
-                color = "blue"
-                if "PYTANIE:" in m: color = "navy"
-            elif "[ADMIN]" in p: color = "red"
+            p_name = msg.get("player", "")
+            m_text = msg.get("message", "")
             
-            chat_col.controls.append(ft.Text(f"{p}: {m}", color=color, selectable=True, size=12))
+            spans = []
+            
+            # Logika kolorów i stylów
+            if p_name == "BOT":
+                # Bot jest zawsze niebieski
+                is_question = "PYTANIE:" in m_text
+                
+                bot_style = ft.TextStyle(color="blue", weight="bold" if is_question else "normal")
+                # Pytanie w ciemnym granacie i pogrubione
+                msg_color = "#0D47A1" if is_question else "blue" # 0D47A1 = Dark Navy
+                msg_weight = "bold" if is_question else "normal"
+                msg_size = 13 if is_question else 12
+                
+                spans.append(ft.TextSpan("BOT: ", bot_style))
+                spans.append(ft.TextSpan(m_text, ft.TextStyle(color=msg_color, weight=msg_weight, size=msg_size)))
+                
+            else:
+                # Gracz
+                if p_name in admin_names:
+                    spans.append(ft.TextSpan("[ADMIN] ", ft.TextStyle(color="red", weight="bold")))
+                
+                # Unikalny kolor gracza
+                p_color = get_player_color(p_name)
+                spans.append(ft.TextSpan(f"{p_name}: ", ft.TextStyle(color=p_color, weight="bold")))
+                
+                # Tekst gracza w tym samym kolorze co nick (lub czarny, jeśli wolisz, ale prosiłeś o własny kolor)
+                spans.append(ft.TextSpan(m_text, ft.TextStyle(color=p_color)))
+            
+            chat_col.controls.append(ft.Text(spans=spans, selectable=True, size=12))
+        
         chat_col.update()
 
     async def game_loop():
@@ -124,17 +142,14 @@ async def main(page: ft.Page):
             try:
                 data = await fetch_json(f"{BACKEND_URL}/state")
                 if data:
-                    # Czas i Pula
                     txt_timer.value = f"{int(data.get('time_left',0))} s"
                     pot_val = data.get("pot", 0)
-                    
-                    # Fazy
                     phase = data.get("phase")
+                    
                     state.local_phase = phase
                     state.answering_player_id = data.get("answering_player_id")
                     state.server_abcd_bought = data.get("abcd_bought", False)
 
-                    # Update gracza
                     me = next((p for p in data.get("players",[]) if p["id"] == state.player_id), None)
                     if me:
                         state.is_admin = me.get("is_admin", False)
@@ -143,7 +158,7 @@ async def main(page: ft.Page):
                         txt_pot.value = f"Pula: {pot_val} zł"
                         await fetch_json(f"{BACKEND_URL}/heartbeat", "POST", {"player_id": state.player_id})
 
-                    # Przyciski
+                    # Logika przycisków
                     is_my_turn_ans = (phase == "answering" and state.answering_player_id == state.player_id)
                     is_bidding = (phase == "bidding")
                     
@@ -155,18 +170,16 @@ async def main(page: ft.Page):
                     btn_5050.disabled = not (is_my_turn_ans and state.server_abcd_bought)
 
                     page.update()
-                    await render_chat(data.get("chat", []))
                     
-                    # Komendy admina
+                    # Przekazujemy listę graczy do render_chat, żeby wiedzieć kto jest adminem
+                    await render_chat(data.get("chat", []), data.get("players", []))
+                    
                     if state.is_admin and phase == "idle":
                         pass
 
             except Exception as e:
                 print(e)
-            
             await asyncio.sleep(1)
-
-    # --- HANDLERY ---
 
     async def do_join(e):
         name = input_name.value
@@ -203,7 +216,6 @@ async def main(page: ft.Page):
         await fetch_json(f"{BACKEND_URL}/finish_bidding", "POST", {"player_id": state.player_id})
     async def do_allin(e):
         await fetch_json(f"{BACKEND_URL}/bid", "POST", {"player_id": state.player_id, "kind": "allin"})
-    
     async def do_hint_abcd(e):
         await fetch_json(f"{BACKEND_URL}/hint", "POST", {"player_id": state.player_id, "kind": "abcd"})
     async def do_hint_5050(e):
