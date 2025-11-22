@@ -2,10 +2,9 @@ import flet as ft
 import asyncio
 import json
 import re
-import time
 from dataclasses import dataclass
 
-# Obsługa Pyodide
+# Obsługa Pyodide (przeglądarka)
 try:
     import js
     from js import fetch
@@ -72,13 +71,18 @@ async def main(page: ft.Page):
     btn_abcd = ft.OutlinedButton("ABCD (losowy koszt)", disabled=True)
     btn_5050 = ft.OutlinedButton("50/50 (losowy koszt)", disabled=True)
     
-    # Login
+    # Login - definiujemy zmienną wcześniej, aby uniknąć błędu z ID
     input_name = ft.TextField(label="Nick")
     btn_join = ft.FilledButton("Dołącz")
+    
+    # --- POPRAWKA TUTAJ ---
+    # Tworzymy obiekt Row i przypisujemy do zmiennej, bez parametru id
+    row_login = ft.Row([input_name, btn_join], alignment="center")
+    # ----------------------
 
     layout = ft.Column([
         ft.Text("AWANTURA O KASĘ", size=24, weight="bold"),
-        ft.Row([input_name, btn_join], alignment="center", id="login_row"),
+        row_login, # Dodajemy zmienną
         ft.Divider(),
         ft.Row([txt_money, txt_pot, txt_timer], alignment="spaceBetween"),
         ft.Container(txt_info, bgcolor="blue_50", padding=10, border_radius=5, alignment=ft.alignment.center),
@@ -94,9 +98,6 @@ async def main(page: ft.Page):
         ft.Row([btn_bid, btn_pass, btn_allin], alignment="center")
     ])
     
-    # Ukrywanie logowania po zalogowaniu
-    row_login = layout.controls[1] 
-
     page.add(layout)
 
     # --- LOGIKA ---
@@ -149,9 +150,6 @@ async def main(page: ft.Page):
                         state.is_admin = me.get("is_admin", False)
                         state.local_money = me.get("money", 0)
                         txt_money.value = f"Kasa: {state.local_money} zł"
-                        
-                        # W licytacji pokazujemy ile już dałem (bid) + pula
-                        # Backend zwraca POT jako sumę.
                         txt_pot.value = f"Pula: {pot_val} zł"
 
                         await fetch_json(f"{BACKEND_URL}/heartbeat", "POST", {"player_id": state.player_id})
@@ -166,9 +164,6 @@ async def main(page: ft.Page):
                     btn_allin.disabled = not is_bidding
                     
                     # Podpowiedzi
-                    # ABCD dostępne tylko jak moja kolej i jeszcze nie kupiono? 
-                    # W sumie backend pozwala kupić raz. Przycisk można zostawić aktywny, backend odrzuci.
-                    # Ale lepiej: ABCD aktywne jeśli moja kolej. 50/50 aktywne jeśli moja kolej I abcd_bought=True
                     btn_abcd.disabled = not is_my_turn_ans
                     btn_5050.disabled = not (is_my_turn_ans and state.server_abcd_bought)
 
@@ -176,23 +171,10 @@ async def main(page: ft.Page):
                     
                     await render_chat(data.get("chat", []))
                     
-                    # Obsługa komend admina (Wybór zestawu)
-                    # Jeśli admin wpisze "1" na czacie, backend sam to obsłużyłby gdyby to był endpoint, 
-                    # ale tutaj mamy logikę, że klient musi wywołać /select_set.
-                    # W poprzednim kodzie backend sam parsował czat? Nie, to było w kliencie.
-                    # Dodajmy to z powrotem tutaj w uproszczonej wersji:
+                    # Wybór zestawu (prosta logika komend dla admina)
                     if state.is_admin and phase == "idle":
-                         # Sprawdź ostatnią wiadomość admina
-                         if data.get("chat"):
-                             last = data.get("chat")[-1]
-                             if last.get("player") == state.player_name and re.fullmatch(r"\d+", last.get("message","")):
-                                 set_num = int(last.get("message"))
-                                 if 1 <= set_num <= 50:
-                                     # Wysyłamy żądanie raz (proste zabezpieczenie przed spamem requestów w pętli: sprawdzamy czy zestaw już nie jest ustawiony)
-                                     # Ale backend resetuje CURRENT_SET na null przy końcu.
-                                     # Uproszczenie: Admin klika guzik albo wpisuje komendę /start [nr].
-                                     # Zostańmy przy tym co było: parsowanie lokalne
-                                     pass
+                        # Logika parsowania komend admina jest w on_send_chat
+                        pass
 
             except Exception as e:
                 print(e)
@@ -209,7 +191,10 @@ async def main(page: ft.Page):
             state.player_id = res["id"]
             state.player_name = res["name"]
             state.joined = True
+            
+            # Ukrywamy wiersz logowania używając zmiennej
             row_login.visible = False
+            
             input_chat.disabled = False
             btn_send.disabled = False
             page.run_task(game_loop)
