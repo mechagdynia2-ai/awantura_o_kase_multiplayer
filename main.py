@@ -14,10 +14,8 @@ try:
     import js
     from js import fetch
 except ImportError:
-    # Fallback dla testów lokalnych (jeśli nie uruchamiasz w przeglądarce)
     js = None
     fetch = None
-    print("Ostrzeżenie: Brak modułu 'js'. Kod zadziała tylko w środowisku Flet Web (Pyodide).")
 
 # ----------------- KONFIGURACJA -----------------
 
@@ -98,6 +96,7 @@ async def fetch_json(url: str, method: str = "GET", body: Optional[dict] = None)
         return None
 
 async def send_bot_message(msg: str):
+    """Wysyła wiadomość jako BOT na czat."""
     await fetch_json(f"{BACKEND_URL}/chat", "POST", {"player": "BOT", "message": msg})
 
 # ----------------- PARSOWANIE I POMOCNICZE -----------------
@@ -165,7 +164,6 @@ async def main(page: ft.Page):
     page.scroll = ft.ScrollMode.AUTO
     
     state = GameState()
-
     name_color_cache: Dict[str, str] = {}
     color_palette = ["#1e3a8a", "#4c1d95", "#064e3b", "#7c2d12", "#111827", "#075985", "#7f1d1d", "#374151"]
 
@@ -175,7 +173,6 @@ async def main(page: ft.Page):
         return name_color_cache[name]
 
     # --- Elementy UI ---
-    
     txt_status = ft.Text("Podaj ksywkę i dołącz do gry.", size=13, color="blue")
     txt_local_money = ft.Text("Twoja kasa: 10000 zł", size=14, weight=ft.FontWeight.BOLD, color="green_700")
     txt_pot = ft.Text("Pula: 0 zł", size=14, weight=ft.FontWeight.BOLD, color="purple_700")
@@ -184,8 +181,6 @@ async def main(page: ft.Page):
     txt_phase_info = ft.Text("", size=13, color="grey_800")
 
     col_chat = ft.Column([], spacing=1, height=220, scroll=ft.ScrollMode.ALWAYS, auto_scroll=True)
-    
-    # WAŻNE: Disabled na start
     txt_chat_input = ft.TextField(label="Napisz na czacie", dense=True, disabled=True, expand=1)
     btn_chat_send = ft.FilledButton("Wyślij", disabled=True) 
 
@@ -210,10 +205,7 @@ async def main(page: ft.Page):
         txt_round_info,
         ft.Divider(height=8),
         ft.Container(
-            content=ft.Column([
-                col_chat,
-                ft.Row([txt_chat_input, btn_chat_send])
-            ]),
+            content=ft.Column([col_chat, ft.Row([txt_chat_input, btn_chat_send])]),
             padding=5, border_radius=10, border=ft.border.all(1, "#e0e0e0"), bgcolor="white", height=280
         ),
         ft.Divider(height=8),
@@ -224,7 +216,7 @@ async def main(page: ft.Page):
 
     page.add(layout)
 
-    # ----------------- UI UPDATERS -----------------
+    # ----------------- UI HELPERS -----------------
 
     def refresh_local_money():
         val = state.local_money
@@ -243,11 +235,10 @@ async def main(page: ft.Page):
         txt_phase_info.color = color
         txt_phase_info.update()
 
-    # ----------------- RENDER CZATU -----------------
-
     async def render_chat(chat_list: list[dict], players_state: list[dict]):
         if not chat_list: return
         current_len = len(col_chat.controls)
+        # Proste sprawdzenie, aby nie przerysowywać ciągle tego samego
         if len(chat_list) == current_len: return
 
         col_chat.controls.clear()
@@ -270,10 +261,9 @@ async def main(page: ft.Page):
                 spans.append(ft.TextSpan(msg_text, ft.TextStyle(color="black", size=12)))
 
             col_chat.controls.append(ft.Text(spans=spans, selectable=True, size=12))
-        
         col_chat.update()
 
-    # ----------------- LOGIKA GRY (Backend + Loop) -----------------
+    # ----------------- LOGIKA GRY (Admin + Network) -----------------
 
     processed_chat_ids = set()
 
@@ -341,7 +331,6 @@ async def main(page: ft.Page):
         state.joined = True
         state.local_money = 10000
 
-        # --- NAPRAWA: Odświeżenie UI po dołączeniu ---
         join_row.visible = False
         join_row.update()
 
@@ -349,7 +338,6 @@ async def main(page: ft.Page):
         btn_chat_send.disabled = False
         txt_chat_input.update()
         btn_chat_send.update()
-        # ---------------------------------------------
         
         txt_status.value = f"Witaj {state.player_name}!" + (" (ADMIN)" if state.is_admin else "")
         txt_status.color = "green"
@@ -362,7 +350,7 @@ async def main(page: ft.Page):
         msg = txt_chat_input.value.strip()
         if not msg: return
 
-        # Logika: czy to odpowiedź na pytanie?
+        # Czy to odpowiedź na pytanie w trakcie tury?
         if state.local_phase == "answering_wait":
              if state.player_id != state.answering_player_id:
                  set_phase_info("Cicho! Teraz odpowiada zwycięzca licytacji.", "red")
@@ -390,12 +378,16 @@ async def main(page: ft.Page):
         if res and res.get("status") == "ok":
             state.local_money = 0 if kind == "allin" else (state.local_money - cost)
             refresh_local_money()
+            # --- POPRAWKA 1: Wyświetl informację o licytacji na czacie ---
+            msg_bid = f"Gracz {state.player_name} podbija stawkę o {cost} zł!" if kind == "normal" else f"Gracz {state.player_name} wchodzi VA BANQUE!"
+            await send_bot_message(msg_bid)
 
     async def on_finish_bidding(e):
         if not state.player_id: return
         await fetch_json(f"{BACKEND_URL}/finish_bidding", "POST", {"player_id": state.player_id})
-        txt_status.value = "Pasuję."
+        txt_status.value = "Pasujesz."
         txt_status.update()
+        await send_bot_message(f"Gracz {state.player_name} pasuje.")
 
     async def on_buy_hint(e, hint_type="abcd"):
         if state.local_phase not in ("answering_wait", "discussion") or state.player_id != state.answering_player_id:
@@ -429,7 +421,7 @@ async def main(page: ft.Page):
 
         await send_bot_message(f"Podpowiedź {hint_type.upper()} (koszt {cost} zł): {msg}")
 
-    # ----------------- ADMIN LOGIC -----------------
+    # ----------------- ADMIN LOGIC (VERDICT) -----------------
 
     async def detect_verdict_logic():
         if not state.is_admin or not (0 <= state.current_q_index < len(state.questions)):
@@ -471,11 +463,10 @@ async def main(page: ft.Page):
         txt_round_info.update()
         await send_bot_message("Za 20 sekund start kolejnej licytacji!")
 
-    # ----------------- PĘTLA GŁÓWNA -----------------
+    # ----------------- GAME LOOP -----------------
 
     async def game_loop():
         while state.joined:
-            # Polling stanu
             data = await fetch_json(f"{BACKEND_URL}/state")
             if data:
                 state.current_round_id = data.get("round_id")
@@ -497,7 +488,7 @@ async def main(page: ft.Page):
 
                 now = time.time()
 
-                # A. COUNTDOWN
+                # --- PHASE: COUNTDOWN ---
                 if state.local_phase == "countdown":
                     remain = int(state.countdown_until - now)
                     set_phase_info(f"Licytacja za: {max(0, remain)} s", "blue")
@@ -507,7 +498,7 @@ async def main(page: ft.Page):
                             await fetch_json(f"{BACKEND_URL}/next_round", "POST", {})
                             await send_bot_message("START LICYTACJI!")
 
-                # B. BIDDING
+                # --- PHASE: BIDDING ---
                 elif state.local_phase == "bidding":
                     is_bidding = (backend_phase == "bidding")
                     if btn_bid.disabled != (not is_bidding):
@@ -523,6 +514,7 @@ async def main(page: ft.Page):
                         state.bidding_fee_paid_for_round = state.current_round_id
                         refresh_local_money()
 
+                    # Przejście do answering
                     if backend_phase == "answering":
                         state.local_phase = "answering_wait"
                         state.answering_player_id = data.get("answering_player_id")
@@ -530,9 +522,14 @@ async def main(page: ft.Page):
                         winner_name = next((p["name"] for p in data.get("players", []) if p["id"] == state.answering_player_id), "?")
                         state.answering_player_name = winner_name
                         
-                        if state.is_admin and 0 <= state.current_q_index < len(state.questions):
-                            q_text = state.questions[state.current_q_index]["question"]
-                            await send_bot_message(f"Gracz {winner_name} wygrał! PYTANIE: {q_text}")
+                        # --- POPRAWKA 2: Wyświetlanie pytania na czacie (tylko Admin) ---
+                        if state.is_admin:
+                            await send_bot_message(f"Licytację wygrał: {winner_name}")
+                            if 0 <= state.current_q_index < len(state.questions):
+                                q_text = state.questions[state.current_q_index]["question"]
+                                await send_bot_message(f"PYTANIE: {q_text}")
+                            else:
+                                await send_bot_message("Błąd: Brak pytania w bazie.")
 
                         im_winner = (state.player_id == state.answering_player_id)
                         btn_hint_abcd.disabled = not im_winner
@@ -540,7 +537,7 @@ async def main(page: ft.Page):
                         btn_hint_abcd.update()
                         btn_hint_5050.update()
 
-                # C. ANSWERING WAIT
+                # --- PHASE: ANSWERING WAIT ---
                 elif state.local_phase == "answering_wait":
                     remain = int(state.answer_deadline - now)
                     set_phase_info(f"Odpowiada {state.answering_player_name}: {max(0, remain)} s", "green")
@@ -552,7 +549,7 @@ async def main(page: ft.Page):
                         if state.is_admin:
                             await send_bot_message("Czas minął! Brak odpowiedzi. Dyskusja 20s.")
 
-                # D. DISCUSSION
+                # --- PHASE: DISCUSSION ---
                 elif state.local_phase == "discussion":
                     remain = int(state.discussion_until - now)
                     set_phase_info(f"Dyskusja: {max(0, remain)} s", "orange")
