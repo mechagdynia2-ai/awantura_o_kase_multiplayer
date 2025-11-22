@@ -8,49 +8,70 @@ import random
 import time
 from thefuzz import fuzz
 import unicodedata
-from typing import Optional
+from typing import Optional, List, Dict
+from dataclasses import dataclass, field
 
 # ----------------- KONFIGURACJA -----------------
 
 BACKEND_URL = "https://game-multiplayer-qfn1.onrender.com"
-GITHUB_RAW_BASE_URL = (
-    "https://raw.githubusercontent.com/mechagdynia2-ai/game/main/assets/"
-)
+GITHUB_RAW_BASE_URL = "https://raw.githubusercontent.com/mechagdynia2-ai/game/main/assets/"
 
 ENTRY_FEE = 500
 BASE_ANSWER_TIME = 60
 HINT_EXTRA_TIME = 30
 
-# ----------------- POMOCNICZE -----------------
+# ----------------- ZARZĄDZANIE STANEM (State Management) -----------------
 
+@dataclass
+class GameState:
+    player_id: Optional[str] = None
+    player_name: str = ""
+    is_admin: bool = False
+    joined: bool = False
+    set_name: str = ""
+    questions: List[Dict] = field(default_factory=list)
+    current_q_index: int = -1
+    
+    # Pieniądze i pula
+    carryover_pot: int = 0
+    current_round_pot: int = 0
+    backend_pot: int = 0
+    hints_extra: int = 0
+    local_money: int = 10000
+    
+    # Fazy i czas
+    local_phase: str = "idle"
+    countdown_until: float = 0.0
+    answer_deadline: float = 0.0
+    discussion_until: float = 0.0
+    
+    # Rozgrywka
+    answering_player_id: Optional[str] = None
+    answering_player_name: str = ""
+    current_answer_text: str = ""
+    verdict_sent: bool = False
+    current_round_id: Optional[str] = None
+    bidding_fee_paid_for_round: Optional[str] = None
+    abcd_bought_this_round: bool = False
 
-def make_async_click(async_callback):
-    def handler(e):
-        async def task():
-            await async_callback(e)
-
-        e.page.run_task(task)
-
-    return handler
-
+# ----------------- WARSTWA SIECIOWA (Web/JS) -----------------
 
 async def fetch_text(url: str) -> str:
     try:
         resp = await fetch(url)
         return await resp.text()
     except Exception as ex:
-        print("[FETCH_TEXT ERROR]", ex)
+        print(f"[FETCH_TEXT ERROR] {ex}")
         return ""
-
 
 def _build_fetch_kwargs(method: str = "GET", body: Optional[dict] = None):
     m = method.upper()
     if m == "GET":
         return js.Object.fromEntries([["method", "GET"]])
+    
     payload = json.dumps(body or {})
     headers = js.Object.fromEntries([["Content-Type", "application/json"]])
     return js.Object.fromEntries([["method", m], ["headers", headers], ["body", payload]])
-
 
 async def fetch_json(url: str, method: str = "GET", body: Optional[dict] = None):
     try:
@@ -62,356 +83,171 @@ async def fetch_json(url: str, method: str = "GET", body: Optional[dict] = None)
         except Exception:
             return raw
     except Exception as ex:
-        print("[FETCH_JSON ERROR]", ex, "url:", url)
+        print(f"[FETCH_JSON ERROR] {ex} url: {url}")
         return None
 
+async def send_bot_message(msg: str):
+    """Pomocnicza funkcja do wysyłania wiadomości bota."""
+    await fetch_json(f"{BACKEND_URL}/chat", "POST", {"player": "BOT", "message": msg})
+
+# ----------------- LOGIKA POMOCNICZA -----------------
 
 def normalize_answer(text: Optional[str]) -> str:
     if not text:
         return ""
     s = str(text).lower().strip()
-    trans = str.maketrans(
-        {
-            "ó": "o",
-            "ł": "l",
-            "ż": "z",
-            "ź": "z",
-            "ć": "c",
-            "ń": "n",
-            "ś": "s",
-            "ą": "a",
-            "ę": "e",
-            "ü": "u",
-        }
-    )
+    # Szybsze mapowanie znaków
+    trans = str.maketrans("ółżź.ćńśąęü", "olzzcnsaeu")
     s = s.translate(trans)
     s = unicodedata.normalize("NFKD", s)
     s = "".join(ch for ch in s if not unicodedata.combining(ch))
-    s = re.sub(r"[^a-z0-9]", "", s)
-    return s
+    return re.sub(r"[^a-z0-9]", "", s)
 
+_parsed_questions_cache: Dict[str, List[Dict]] = {}
 
-_parsed_questions_cache: dict[str, list[dict]] = {}
-
-
-async def parse_question_file(filename: str) -> list[dict]:
-    """
-    Parsowanie tak, aby:
-    - pytanie = tylko pierwsza linia po numerze (bez 'prawidłowa odpowiedź' i bez ABCD)
-    - poprawna odpowiedź i ABCD brane z dalszej części bloku
-    """
+async def parse_question_file(filename: str) -> List[Dict]:
     if filename in _parsed_questions_cache:
         return _parsed_questions_cache[filename]
 
-    url = f"{GITHUB_RAW_BASE_URL}{filename}"
-    content = await fetch_text(url)
+    content = await fetch_text(f"{GITHUB_RAW_BASE_URL}{filename}")
     if not content:
         return []
 
-    parsed: list[dict] = []
-
+    parsed: List[Dict] = []
+    # Dzielimy na bloki zaczynające się od numeru pytania (np. "1.", "15.")
     blocks = re.split(r"\n(?=\d{1,3}\.)", content)
+    
     for block in blocks:
         block = block.strip()
         if not block:
             continue
-
+        
         lines = block.splitlines()
         if not lines:
             continue
 
-        # Pierwsza linia zawiera numer i pytanie
+        # Parsowanie pytania
         first_line = lines[0].strip()
         num_match = re.match(r"^\d{1,3}\.\s*(.+)", first_line)
         if not num_match:
             continue
         question = num_match.group(1).strip()
 
-        # Reszta bloku na poprawną odpowiedź i ABCD
+        # Szukanie odpowiedzi w reszcie bloku
         rest = "\n".join(lines[1:])
-
+        
+        # Regex dla poprawnej odpowiedzi
         correct_match = re.search(
-            r"(praw\w*\s*odpow\w*|odpowiedzi?\.?\s*prawidłowe?|prawidłowa\s*odpowiedź)\s*[:=]\s*(.+)",
-            rest,
-            re.IGNORECASE,
+            r"(praw\w*\s*odpow\w*|odpowiedzi?\.?\s*prawidłowe?|prawidłowa\s*odpowiedź|correct)\s*[:=]\s*(.+)",
+            rest, re.IGNORECASE | re.MULTILINE
         )
-        correct = None
-        if correct_match:
-            correct = correct_match.group(2).strip().splitlines()[0].strip()
-        if not correct:
-            cm = re.search(
-                r"^\s*correct\s*[:=]\s*(.+)$", rest, re.IGNORECASE | re.MULTILINE
-            )
-            if cm:
-                correct = cm.group(1).strip()
-        if not correct:
+        if not correct_match:
             continue
+        correct = correct_match.group(2).strip().splitlines()[0].strip()
 
+        # Regex dla wariantów A, B, C, D
         answers = []
-        ok = True
+        valid_abcd = True
         for letter in ["A", "B", "C", "D"]:
             m = re.search(rf"\b{letter}\s*=\s*(.+?)(?:,|\n|$)", rest, re.IGNORECASE)
             if not m:
-                ok = False
+                valid_abcd = False
                 break
             answers.append(m.group(1).strip())
 
-        if not ok or len(answers) != 4:
-            continue
-
-        parsed.append(
-            {
+        if valid_abcd and len(answers) == 4:
+            parsed.append({
                 "question": question,
                 "correct": correct,
                 "answers": answers,
-            }
-        )
+            })
 
     _parsed_questions_cache[filename] = parsed
     return parsed
 
-
-# ----------------- GŁÓWNE UI / LOGIKA -----------------
-
+# ----------------- GŁÓWNA APLIKACJA -----------------
 
 async def main(page: ft.Page):
     page.title = "Awantura o Kasę – Multiplayer"
     page.theme_mode = ft.ThemeMode.LIGHT
     page.scroll = ft.ScrollMode.AUTO
-    page.vertical_alignment = ft.MainAxisAlignment.START
+    
+    # Inicjalizacja stanu
+    state = GameState()
 
-    mp_state = {
-        "player_id": None,
-        "player_name": "",
-        "is_admin": False,
-        "joined": False,
-        "set_name": "",
-        "questions": [],
-        "current_q_index": -1,
-        "carryover_pot": 0,
-        "current_round_pot": 0,  # wyświetlana pula (carryover + backend + podpowiedzi)
-        "backend_pot": 0,  # pula z backendu (z licytacji)
-        "hints_extra": 0,  # koszt podpowiedzi w tej rundzie
-        "local_phase": "idle",
-        "countdown_until": 0.0,
-        "answer_deadline": 0.0,
-        "discussion_until": 0.0,
-        "answering_player_id": None,
-        "answering_player_name": "",
-        "current_answer_text": "",
-        "verdict_sent": False,
-        "last_round_id": None,
-        "current_round_id": None,
-        "bidding_fee_paid_for_round": None,  # round_id, dla którego pobrano wpisowe 500
-        "local_money": 10000,
-        "abcd_bought_this_round": False,
-    }
-
-    name_color_cache: dict[str, str] = {}
+    # --- Kolorowanie nicków ---
+    name_color_cache: Dict[str, str] = {}
     color_palette = [
-        "#1e3a8a",
-        "#4c1d95",
-        "#064e3b",
-        "#7c2d12",
-        "#111827",
-        "#075985",
-        "#7f1d1d",
-        "#374151",
+        "#1e3a8a", "#4c1d95", "#064e3b", "#7c2d12", "#111827",
+        "#075985", "#7f1d1d", "#374151", "#b91c1c", "#047857"
     ]
 
     def name_to_color(name: str) -> str:
-        if name in name_color_cache:
-            return name_color_cache[name]
-        idx = abs(hash(name)) % len(color_palette)
-        name_color_cache[name] = color_palette[idx]
-        return color_palette[idx]
+        if name not in name_color_cache:
+            idx = abs(hash(name)) % len(color_palette)
+            name_color_cache[name] = color_palette[idx]
+        return name_color_cache[name]
 
-    # --- UI ---
+    # ----------------- UI CONTROLS -----------------
+    
+    txt_status = ft.Text("Podaj ksywkę i dołącz do gry.", size=13, color="blue")
+    txt_local_money = ft.Text("Twoja kasa: 10000 zł", size=14, weight=ft.FontWeight.BOLD, color="green_700")
+    txt_pot = ft.Text("Pula: 0 zł", size=14, weight=ft.FontWeight.BOLD, color="purple_700")
+    txt_timer = ft.Text("Czas: -- s", size=14, weight=ft.FontWeight.BOLD)
+    txt_round_info = ft.Text("Oczekiwanie na zestaw pytań...", size=13, color="grey_700")
+    txt_phase_info = ft.Text("", size=13, color="grey_800")
 
-    txt_title = ft.Text(
-        "AWANTURA O KASĘ – MULTIPLAYER",
-        size=22,
-        weight=ft.FontWeight.BOLD,
-        text_align=ft.TextAlign.CENTER,
-    )
-    txt_status = ft.Text(
-        "Podaj ksywkę i dołącz do gry.",
-        size=13,
-        color="blue",
-    )
-    txt_local_money = ft.Text(
-        "Twoja kasa (lokalnie): 10000 zł",
-        size=14,
-        weight=ft.FontWeight.BOLD,
-        color="green_700",
-    )
-    txt_round_info = ft.Text(
-        "Brak wybranego zestawu pytań.",
-        size=13,
-        color="grey_700",
-    )
-    txt_phase_info = ft.Text(
-        "",
-        size=13,
-        color="grey_800",
-    )
+    # Czat
+    col_chat = ft.Column([], spacing=1, height=220, scroll=ft.ScrollMode.ALWAYS, auto_scroll=True)
+    txt_chat_input = ft.TextField(label="Napisz na czacie", dense=True, disabled=True, expand=1)
+    btn_chat_send = ft.FilledButton("Wyślij", disabled=True, expand=0) # Expand 0 to fix layout
 
-    # --- CZAT ---
-    col_chat = ft.Column(
-        [],
-        spacing=1,
-        height=220,
-        scroll=ft.ScrollMode.ALWAYS,
-        auto_scroll=True,
-    )
+    # Przyciski gry
+    btn_hint_abcd = ft.OutlinedButton("Kup ABCD (1000–3000 zł)", width=220, disabled=True)
+    btn_hint_5050 = ft.OutlinedButton("Kup 50/50 (500–2500 zł)", width=220, disabled=True)
+    
+    btn_bid = ft.FilledButton("Licytuj +100 zł", width=180, disabled=True)
+    btn_finish_bidding = ft.FilledButton("Pasuję", width=180, disabled=True)
+    btn_all_in = ft.FilledButton("VA BANQUE!", width=180, disabled=True)
 
-    txt_chat_input = ft.TextField(
-        label="Napisz na czacie",
-        multiline=False,
-        dense=True,
-        border_radius=8,
-        text_size=13,
-        disabled=True,
-        on_submit=lambda e: btn_chat_send.on_click(e),
-    )
+    # Rejestracja
+    txt_name = ft.TextField(label="Twoja ksywka", width=220, dense=True)
+    btn_join = ft.FilledButton("Dołącz", width=150)
+    join_row = ft.Row([txt_name, btn_join], alignment=ft.MainAxisAlignment.CENTER)
 
-    btn_chat_send = ft.FilledButton(
-        "Wyślij",
-        disabled=True,
-    )
-
-    # Ustaw proporcje 3:1 (przycisk:tekst)
-    btn_chat_send.expand = 3
-    txt_chat_input.expand = 1
-
-    chat_row = ft.Row(
-        [btn_chat_send, txt_chat_input],
-        alignment=ft.MainAxisAlignment.START,
-        spacing=4,
-    )
-
-    chat_box = ft.Container(
-        content=ft.Column(
-            [
-                col_chat,
-                chat_row,
-            ],
-            spacing=2,
+    # Layout główny
+    layout = ft.Column([
+        ft.Text("AWANTURA O KASĘ – MULTIPLAYER", size=22, weight="bold", text_align="center"),
+        txt_status,
+        ft.Divider(height=8),
+        join_row,
+        ft.Row([txt_local_money, txt_pot], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+        ft.Row([txt_timer, txt_phase_info], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+        txt_round_info,
+        ft.Divider(height=8),
+        ft.Container(
+            content=ft.Column([col_chat, ft.Row([txt_chat_input, btn_chat_send])]),
+            padding=5, border_radius=10, border=ft.border.all(1, "#e0e0e0"), bgcolor="white", height=280
         ),
-        padding=4,
-        border_radius=10,
-        border=ft.border.all(1, "#e0e0e0"),
-        bgcolor="white",
-        height=260,
-    )
-
-    # --- PULA / TIMER / PODPOWIEDZI ---
-    txt_pot = ft.Text(
-        "Pula: 0 zł",
-        size=14,
-        weight=ft.FontWeight.BOLD,
-        color="purple_700",
-    )
-    txt_timer = ft.Text(
-        "Czas: -- s",
-        size=14,
-        weight=ft.FontWeight.BOLD,
-    )
-
-    btn_hint_abcd = ft.OutlinedButton(
-        "Kup ABCD (1000–3000 zł)",
-        width=220,
-        disabled=True,
-    )
-    btn_hint_5050 = ft.OutlinedButton(
-        "Kup 50/50 (500–2500 zł)",
-        width=220,
-        disabled=True,
-    )
-    hint_col = ft.Column(
-        [btn_hint_abcd, btn_hint_5050],
-        spacing=6,
-        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-    )
-
-    # --- PRZYCISKI LICYTACJI ---
-    btn_bid = ft.FilledButton(
-        "Licytuj +100 zł",
-        width=180,
-        disabled=True,
-    )
-    btn_finish_bidding = ft.FilledButton(
-        "Kończę licytację",
-        width=180,
-        disabled=True,
-    )
-    btn_all_in = ft.FilledButton(
-        "VA BANQUE!",
-        width=180,
-        disabled=True,
-    )
-    bidding_col = ft.Column(
-        [btn_bid, btn_finish_bidding, btn_all_in],
-        spacing=4,
-        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-    )
-
-    # --- DOŁĄCZANIE ---
-    txt_name = ft.TextField(
-        label="Twoja ksywka",
-        width=220,
-        dense=True,
-    )
-    btn_join = ft.FilledButton("Dołącz do pokoju", width=180)
-    join_row = ft.Row(
-        [txt_name, btn_join],
-        alignment=ft.MainAxisAlignment.START,
-        spacing=10,
-    )
-
-    layout = ft.Column(
-        [
-            txt_title,
-            txt_status,
-            ft.Divider(height=8),
-            join_row,
-            ft.Row(
-                [txt_local_money, txt_pot],
-                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-            ),
-            txt_timer,
-            txt_round_info,
-            txt_phase_info,
-            ft.Divider(height=8),
-            chat_box,
-            ft.Divider(height=8),
-            hint_col,
-            ft.Divider(height=8),
-            bidding_col,
-        ],
-        spacing=6,
-        horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
-    )
+        ft.Divider(height=8),
+        ft.Column([btn_hint_abcd, btn_hint_5050], horizontal_alignment="center"),
+        ft.Divider(height=8),
+        ft.Row([btn_bid, btn_finish_bidding, btn_all_in], alignment=ft.MainAxisAlignment.CENTER, wrap=True),
+    ], spacing=6)
 
     page.add(layout)
-    page.update()
 
-    # --- FUNKCJE UI ---
+    # ----------------- AKTUALIZACJA UI -----------------
 
     def refresh_local_money():
-        val = mp_state["local_money"]
-        txt_local_money.value = f"Twoja kasa (lokalnie): {val} zł"
-        if val <= 0:
-            txt_local_money.color = "red_700"
-        elif val < ENTRY_FEE:
-            txt_local_money.color = "orange_700"
-        else:
-            txt_local_money.color = "green_700"
+        val = state.local_money
+        txt_local_money.value = f"Twoja kasa: {val} zł"
+        txt_local_money.color = "red_700" if val <= 0 else ("orange_700" if val < ENTRY_FEE else "green_700")
         txt_local_money.update()
 
     def refresh_pot_label():
-        total = mp_state["carryover_pot"] + mp_state["backend_pot"] + mp_state["hints_extra"]
-        mp_state["current_round_pot"] = total
+        total = state.carryover_pot + state.backend_pot + state.hints_extra
+        state.current_round_pot = total
         txt_pot.value = f"Pula: {total} zł"
         txt_pot.update()
 
@@ -420,16 +256,16 @@ async def main(page: ft.Page):
         txt_phase_info.color = color
         txt_phase_info.update()
 
-    # --- render czatu ---
-    last_chat_len = 0
+    # ----------------- LOGIKA CZATU -----------------
 
-    def render_chat(chat_list: list[dict], players_state: list[dict]):
-        nonlocal last_chat_len
-        if not chat_list:
-            return
-        if len(chat_list) == last_chat_len:
-            return
-        last_chat_len = len(chat_list)
+    async def render_chat(chat_list: list[dict], players_state: list[dict]):
+        # Optymalizacja: nie renderuj jeśli nic się nie zmieniło
+        if not chat_list: return
+        current_len = len(col_chat.controls)
+        if len(chat_list) <= current_len: 
+             # Opcjonalnie: sprawdź czy ostatnia wiadomość jest taka sama, 
+             # ale proste porównanie długości w tym przypadku często wystarcza
+             if len(chat_list) == current_len: return
 
         admin_names = {p["name"] for p in players_state if p.get("is_admin")}
         col_chat.controls.clear()
@@ -438,811 +274,351 @@ async def main(page: ft.Page):
             player_name = m.get("player", "?")
             msg_text = m.get("message", "")
             is_bot = player_name == "BOT"
-
-            spans: list[ft.TextSpan] = []
+            spans = []
 
             if is_bot:
-                # Specjalne formatowanie PYTANIA: cała linijka ciemno-niebieska i pogrubiona
-                if msg_text.startswith("PYTANIE:"):
-                    spans.append(
-                        ft.TextSpan(
-                            f"BOT: {msg_text}",
-                            ft.TextStyle(
-                                color="#123499",
-                                weight=ft.FontWeight.BOLD,
-                                size=12,
-                            ),
-                        )
-                    )
-                else:
-                    spans.append(
-                        ft.TextSpan(
-                            "BOT: ",
-                            ft.TextStyle(
-                                color="black",
-                                weight=ft.FontWeight.BOLD,
-                                size=12,
-                            ),
-                        )
-                    )
-                    spans.append(
-                        ft.TextSpan(
-                            msg_text,
-                            ft.TextStyle(color="black", size=12),
-                        )
-                    )
+                color = "#123499" if msg_text.startswith("PYTANIE:") else "black"
+                spans.append(ft.TextSpan(f"BOT: {msg_text}", ft.TextStyle(color=color, weight="bold", size=12)))
             else:
-                is_admin = player_name in admin_names
-                if is_admin:
-                    spans.append(
-                        ft.TextSpan(
-                            "[ADMIN] ",
-                            ft.TextStyle(
-                                color="red",
-                                weight=ft.FontWeight.BOLD,
-                                size=12,
-                            ),
-                        )
-                    )
-                name_color = name_to_color(player_name)
-                spans.append(
-                    ft.TextSpan(
-                        f"{player_name}: ",
-                        ft.TextStyle(
-                            color=name_color,
-                            weight=ft.FontWeight.BOLD,
-                            size=12,
-                        ),
-                    )
-                )
-                spans.append(
-                    ft.TextSpan(
-                        msg_text,
-                        ft.TextStyle(color="black", size=12),
-                    )
-                )
+                if player_name in admin_names:
+                    spans.append(ft.TextSpan("[ADMIN] ", ft.TextStyle(color="red", weight="bold", size=12)))
+                
+                spans.append(ft.TextSpan(f"{player_name}: ", ft.TextStyle(color=name_to_color(player_name), weight="bold", size=12)))
+                spans.append(ft.TextSpan(msg_text, ft.TextStyle(color="black", size=12)))
 
-            col_chat.controls.append(
-                ft.Text(
-                    spans=spans,
-                    max_lines=4,
-                    overflow=ft.TextOverflow.ELLIPSIS,
-                )
-            )
+            col_chat.controls.append(ft.Text(spans=spans, selectable=True, size=12))
+        
         col_chat.update()
 
-    # --- wykrywanie zniknięcia gracza ---
+    # ----------------- OBSŁUGA LOGIKI GRY -----------------
 
-    async def detect_player_disconnect(players_list):
-        now = time.time()
-        for p in players_list:
-            if "last_heartbeat" in p and now - p["last_heartbeat"] > 1.0:
-                await fetch_json(
-                    f"{BACKEND_URL}/chat",
-                    "POST",
-                    {
-                        "player": "BOT",
-                        "message": f"{p['name']} opuścił grę",
-                    },
-                )
-
-    processed_chat_ids: set[float] = set()
+    processed_chat_ids = set()
 
     async def process_chat_commands(chat_list: list[dict], players_state: list[dict]):
-        # Admin wybiera zestaw przez wpisanie numeru 1–50
-        if mp_state["set_name"]:
-            return
+        """Służy głównie do wykrywania wyboru zestawu przez Admina."""
+        if state.set_name: return # Zestaw już wybrany
+
         admin_names = {p["name"] for p in players_state if p.get("is_admin")}
-        if not admin_names:
-            return
+        if not admin_names: return
 
         for m in chat_list:
             ts = m.get("timestamp", 0.0)
-            if ts in processed_chat_ids:
-                continue
+            if ts in processed_chat_ids: continue
             processed_chat_ids.add(ts)
 
-            player_name = m.get("player", "")
-            msg_text = (m.get("message") or "").strip()
-            if player_name not in admin_names:
-                continue
+            player = m.get("player", "")
+            msg = str(m.get("message", "")).strip()
+            
+            if player in admin_names and re.fullmatch(r"0?\d{1,2}", msg):
+                num = int(msg)
+                if 1 <= num <= 50:
+                    await load_question_set(num)
+                    break
 
-            if not re.fullmatch(r"0?\d{1,2}", msg_text):
-                continue
+    async def load_question_set(num: int):
+        filename = f"{num:02d}.txt"
+        questions = await parse_question_file(filename)
+        
+        if not questions:
+            await send_bot_message(f"Błąd: nie udało się załadować zestawu {filename}.")
+            return
 
-            num = int(msg_text)
-            if num < 1 or num > 50:
-                continue
+        if state.is_admin:
+            await fetch_json(f"{BACKEND_URL}/select_set", "POST", {"player_id": state.player_id, "set_no": num})
 
-            filename = f"{num:02d}.txt"
-            questions = await parse_question_file(filename)
-            if not questions:
-                await fetch_json(
-                    f"{BACKEND_URL}/chat",
-                    "POST",
-                    {
-                        "player": "BOT",
-                        "message": f"Nie udało się załadować zestawu {filename}.",
-                    },
-                )
-                return
+        # Reset stanu gry pod nowy zestaw
+        state.set_name = str(num)
+        state.questions = questions
+        state.current_q_index = 0
+        state.carryover_pot = 0
+        state.local_phase = "countdown"
+        state.countdown_until = time.time() + 20.0
+        state.verdict_sent = False
+        
+        refresh_pot_label()
+        
+        txt_round_info.value = f"Pytanie 1 / {len(questions)} (Zestaw {num})"
+        txt_round_info.update()
 
-            if mp_state["is_admin"]:
-                await fetch_json(
-                    f"{BACKEND_URL}/select_set",
-                    "POST",
-                    {
-                        "player_id": mp_state["player_id"],
-                        "set_no": num,
-                    },
-                )
+        await send_bot_message(f"Wybrano zestaw {num}. Za 20 sekund start licytacji!")
+        set_phase_info("Odliczanie do licytacji...", "blue")
 
-            mp_state["set_name"] = filename.replace(".txt", "")
-            mp_state["questions"] = questions
-            mp_state["current_q_index"] = 0
-            mp_state["carryover_pot"] = 0
-            mp_state["current_round_pot"] = 0
-            mp_state["backend_pot"] = 0
-            mp_state["hints_extra"] = 0
-            mp_state["abcd_bought_this_round"] = False
-            mp_state["local_phase"] = "countdown"
-            mp_state["countdown_until"] = time.time() + 20.0
-            mp_state["verdict_sent"] = False
-            mp_state["answering_player_id"] = None
-            mp_state["answering_player_name"] = ""
-            mp_state["current_answer_text"] = ""
-            mp_state["bidding_fee_paid_for_round"] = None
-            refresh_pot_label()
+    # ----------------- AKCJE UŻYTKOWNIKA -----------------
 
-            txt_round_info.value = (
-                f"Pytanie 1 / {len(questions)} (Zestaw {mp_state['set_name']})"
-            )
-            txt_round_info.update()
-
-            await fetch_json(
-                f"{BACKEND_URL}/chat",
-                "POST",
-                {
-                    "player": "BOT",
-                    "message": f"Zestaw pytań nr {mp_state['set_name']} został wybrany.",
-                },
-            )
-            await fetch_json(
-                f"{BACKEND_URL}/chat",
-                "POST",
-                {
-                    "player": "BOT",
-                    "message": "Za 20 sekund start pierwszej licytacji!",
-                },
-            )
-
-            set_phase_info(
-                "Odliczanie 20 s do startu licytacji...",
-                color="blue",
-            )
-            page.update()
-            break
-
-    async def mp_register(e):
-        name = (txt_name.value or "").strip()
+    async def on_join(e):
+        name = txt_name.value.strip()
         if not name:
-            txt_status.value = "Podaj ksywkę, aby dołączyć."
-            txt_status.color = "red"
+            txt_status.value = "Podaj ksywkę!"
             txt_status.update()
             return
 
-        data = await fetch_json(
-            f"{BACKEND_URL}/register",
-            "POST",
-            {"name": name},
-        )
-        if not data or "id" not in data:
-            txt_status.value = "Błąd rejestracji (backend)."
-            txt_status.color = "red"
+        res = await fetch_json(f"{BACKEND_URL}/register", "POST", {"name": name})
+        if not res or "id" not in res:
+            txt_status.value = "Błąd serwera przy rejestracji."
             txt_status.update()
             return
 
-        mp_state["player_id"] = data["id"]
-        mp_state["player_name"] = data.get("name", name)
-        mp_state["is_admin"] = data.get("is_admin", False)
-        mp_state["joined"] = True
-        mp_state["local_money"] = 10000
-
-        txt_status.value = f"Dołączono jako {mp_state['player_name']}."
-        if mp_state["is_admin"]:
-            txt_status.value += " Jesteś ADMINEM – wpisz na czacie numer 1–50, aby wybrać zestaw pytań."
-        else:
-            txt_status.value += " Czekamy, aż ADMIN wybierze zestaw pytań (numer 1–50 na czacie)."
-        txt_status.color = "green"
-        txt_status.update()
+        state.player_id = res["id"]
+        state.player_name = res.get("name", name)
+        state.is_admin = res.get("is_admin", False)
+        state.joined = True
+        state.local_money = 10000
 
         join_row.visible = False
         txt_chat_input.disabled = False
         btn_chat_send.disabled = False
+        
+        txt_status.value = f"Witaj {state.player_name}!" + (" (ADMIN)" if state.is_admin else "")
+        txt_status.color = "green"
+        txt_status.update()
+        
         refresh_local_money()
-        refresh_pot_label()
-        page.update()
+        page.run_task(game_loop)
 
-        page.run_task(mp_heartbeat_loop)
-        page.run_task(mp_poll_state)
+    async def on_send_chat(e):
+        msg = txt_chat_input.value.strip()
+        if not msg: return
 
-    async def mp_heartbeat_loop():
-        while mp_state["player_id"]:
-            await asyncio.sleep(10)
-            pid = mp_state["player_id"]
-            if not pid:
-                break
-            resp = await fetch_json(
-                f"{BACKEND_URL}/heartbeat",
-                "POST",
-                {"player_id": pid},
-            )
-            if not resp or resp.get("status") != "ok":
-                break
-            mp_state["is_admin"] = resp.get("is_admin", mp_state["is_admin"])
+        # Logika odpowiadania na pytanie
+        if state.local_phase == "answering_wait":
+             if state.player_id != state.answering_player_id:
+                 set_phase_info("Cicho! Teraz odpowiada zwycięzca licytacji.", "red")
+                 return
+             elif not state.current_answer_text:
+                 # To jest odpowiedź gracza na pytanie
+                 state.current_answer_text = msg
+                 state.local_phase = "discussion"
+                 state.discussion_until = time.time() + 20.0
+                 await send_bot_message(f"Gracz {state.player_name} odpowiada: {msg}. A wy jak myślicie? (20s na dyskusję)")
+                 set_phase_info("Czas na dyskusję...", "blue")
 
-    async def mp_send_chat(e):
-        msg = (txt_chat_input.value or "").strip()
-        if not msg:
-            return
-
-        lp = mp_state["local_phase"]
-        answering_id = mp_state["answering_player_id"]
-        my_id = mp_state["player_id"]
-
-        # Tylko zwycięzca może odpowiadać w fazie answering_wait
-        if lp == "answering_wait" and answering_id and my_id != answering_id:
-            set_phase_info(
-                f"Teraz odpowiada {mp_state['answering_player_name']}. Poczekaj na swoją kolej.",
-                color="red",
-            )
-            return
-
-        # Wyślij do backendu (normalna wiadomość gracza)
-        await fetch_json(
-            f"{BACKEND_URL}/chat",
-            "POST",
-            {"player": mp_state["player_name"] or "Anonim", "message": msg},
-        )
+        # Wysyłka standardowa
+        await fetch_json(f"{BACKEND_URL}/chat", "POST", {"player": state.player_name, "message": msg})
         txt_chat_input.value = ""
+        txt_chat_input.focus()
         txt_chat_input.update()
 
-        # Jeśli zwycięzca licytacji właśnie udzielił pierwszej odpowiedzi
-        if (
-            lp == "answering_wait"
-            and answering_id
-            and my_id == answering_id
-            and not mp_state["current_answer_text"]
-        ):
-            mp_state["current_answer_text"] = msg
-            mp_state["local_phase"] = "discussion"
-            mp_state["discussion_until"] = time.time() + 20.0
-            mp_state["verdict_sent"] = False
+    async def on_bid(e, kind="normal"):
+        if not state.player_id: return
+        cost = 100 if kind == "normal" else state.local_money
+        
+        if state.local_money < cost and kind == "normal":
+            return # Brak kasy
 
-            # BOT: a wy jak myślicie?
-            await fetch_json(
-                f"{BACKEND_URL}/chat",
-                "POST",
-                {
-                    "player": "BOT",
-                    "message": (
-                        f"Gracz {mp_state['player_name']} odpowiedział: {msg}. "
-                        "A wy jak myślicie? Macie 20 sekund na komentarze!"
-                    ),
-                },
-            )
+        res = await fetch_json(f"{BACKEND_URL}/bid", "POST", {"player_id": state.player_id, "kind": kind})
+        if res and res.get("status") == "ok":
+            state.local_money = 0 if kind == "allin" else (state.local_money - cost)
+            refresh_local_money()
 
-            set_phase_info(
-                "Dyskusja: wszyscy mogą pisać na czacie przez 20 s.",
-                color="blue",
-            )
-            page.update()
-
-    async def mp_bid_normal(e):
-        if not mp_state["player_id"]:
-            return
-
-        # Sprawdź kasę na +100
-        if mp_state["local_money"] < 100:
-            txt_status.value = "Nie masz wystarczającej kasy, aby podbić o 100 zł."
-            txt_status.color = "red"
-            txt_status.update()
-            return
-
-        data = await fetch_json(
-            f"{BACKEND_URL}/bid",
-            "POST",
-            {"player_id": mp_state["player_id"], "kind": "normal"},
-        )
-        if not data or data.get("status") != "ok":
-            txt_status.value = data.get("detail", "Błąd licytacji +100.")
-            txt_status.color = "red"
-            txt_status.update()
-            return
-
-        # Odejmujemy 100 zł lokalnie
-        mp_state["local_money"] -= 100
-        refresh_local_money()
-
-    async def mp_bid_allin(e):
-        if not mp_state["player_id"]:
-            return
-
-        if mp_state["local_money"] <= 0:
-            txt_status.value = "Nie masz kasy na VA BANQUE."
-            txt_status.color = "red"
-            txt_status.update()
-            return
-
-        data = await fetch_json(
-            f"{BACKEND_URL}/bid",
-            "POST",
-            {"player_id": mp_state["player_id"], "kind": "allin"},
-        )
-        if not data or data.get("status") != "ok":
-            txt_status.value = data.get("detail", "Błąd licytacji VA BANQUE.")
-            txt_status.color = "red"
-            txt_status.update()
-            return
-
-        # Oddajesz całą kasę
-        mp_state["local_money"] = 0
-        refresh_local_money()
-
-    async def mp_finish_bidding(e):
-        if not mp_state["player_id"]:
-            return
-
-        data = await fetch_json(
-            f"{BACKEND_URL}/finish_bidding",
-            "POST",
-            {"player_id": mp_state["player_id"]},
-        )
-        if not data or data.get("status") != "ok":
-            txt_status.value = data.get("detail", "Błąd zakończenia licytacji.")
-            txt_status.color = "red"
-            txt_status.update()
-            return
-
-        txt_status.value = "Licytacja zakończona. Czekamy na wynik z backendu."
-        txt_status.color = "blue"
+    async def on_finish_bidding(e):
+        if not state.player_id: return
+        await fetch_json(f"{BACKEND_URL}/finish_bidding", "POST", {"player_id": state.player_id})
+        txt_status.value = "Zakończyłeś licytację."
         txt_status.update()
 
-    async def buy_hint_abcd(e):
-        # Podpowiedź ABCD tylko w answering_wait / discussion i tylko dla zwycięzcy
-        if mp_state["local_phase"] not in ("answering_wait", "discussion"):
-            set_phase_info(
-                "Podpowiedzi są dostępne tylko podczas odpowiadania na pytanie.",
-                color="red",
-            )
-            return
-        if mp_state["player_id"] != mp_state["answering_player_id"]:
-            set_phase_info(
-                "Tylko gracz, który wygrał licytację, może kupować podpowiedzi.",
-                color="red",
-            )
+    async def on_buy_hint(e, hint_type="abcd"):
+        if state.local_phase not in ("answering_wait", "discussion") or state.player_id != state.answering_player_id:
+            return # Nie twoja kolej
+
+        cost = random.randint(1000, 3000) if hint_type == "abcd" else random.randint(500, 2500)
+        
+        if hint_type == "5050" and not state.abcd_bought_this_round:
+            set_phase_info("Najpierw kup ABCD!", "red")
             return
 
-        cost = random.randint(1000, 3000)
-        if mp_state["local_money"] < cost:
-            set_phase_info(
-                f"Nie stać Cię na podpowiedź ABCD ({cost} zł).",
-                color="red",
-            )
+        if state.local_money < cost:
+            set_phase_info(f"Za mało kasy ({cost} zł)", "red")
             return
 
-        # Odejmujemy kasę i zwiększamy pulę o koszt podpowiedzi
-        mp_state["local_money"] -= cost
-        mp_state["hints_extra"] += cost
-        mp_state["answer_deadline"] += HINT_EXTRA_TIME
-        mp_state["abcd_bought_this_round"] = True
+        state.local_money -= cost
+        state.hints_extra += cost
+        state.answer_deadline += HINT_EXTRA_TIME
+        if hint_type == "abcd": state.abcd_bought_this_round = True
+        
         refresh_local_money()
         refresh_pot_label()
 
-        q_idx = mp_state["current_q_index"]
-        if 0 <= q_idx < len(mp_state["questions"]):
-            q = mp_state["questions"][q_idx]
-            answers = q["answers"]
-            text_abcd = (
-                f"A) {answers[0]}, B) {answers[1]}, "
-                f"C) {answers[2]}, D) {answers[3]}"
-            )
-            await fetch_json(
-                f"{BACKEND_URL}/chat",
-                "POST",
-                {
-                    "player": "BOT",
-                    "message": f"Podpowiedź ABCD (koszt {cost} zł): {text_abcd}",
-                },
-            )
-            set_phase_info(
-                f"Kupiono podpowiedź ABCD za {cost} zł. Czas na odpowiedź wydłużony.",
-                color="blue",
-            )
-            page.update()
-
-    async def buy_hint_5050(e):
-        # Podpowiedź 50/50 tylko po ABCD
-        if mp_state["local_phase"] not in ("answering_wait", "discussion"):
-            set_phase_info(
-                "Podpowiedzi są dostępne tylko podczas odpowiadania na pytanie.",
-                color="red",
-            )
-            return
-        if mp_state["player_id"] != mp_state["answering_player_id"]:
-            set_phase_info(
-                "Tylko gracz, który wygrał licytację, może kupować podpowiedzi.",
-                color="red",
-            )
-            return
-        if not mp_state["abcd_bought_this_round"]:
-            set_phase_info(
-                "Najpierw kup podpowiedź ABCD, dopiero potem 50/50.",
-                color="red",
-            )
-            return
-
-        cost = random.randint(500, 2500)
-        if mp_state["local_money"] < cost:
-            set_phase_info(
-                f"Nie stać Cię na 50/50 ({cost} zł).",
-                color="red",
-            )
-            return
-
-        mp_state["local_money"] -= cost
-        mp_state["hints_extra"] += cost
-        mp_state["answer_deadline"] += HINT_EXTRA_TIME
-        refresh_local_money()
-        refresh_pot_label()
-
-        q_idx = mp_state["current_q_index"]
-        if 0 <= q_idx < len(mp_state["questions"]):
-            q = mp_state["questions"][q_idx]
-            correct = q["correct"]
-            wrong = [a for a in q["answers"] if a != correct]
+        # Generowanie treści podpowiedzi
+        q = state.questions[state.current_q_index]
+        if hint_type == "abcd":
+            msg = f"Opcje: A) {q['answers'][0]}, B) {q['answers'][1]}, C) {q['answers'][2]}, D) {q['answers'][3]}"
+        else:
+            # 50/50
+            wrong = [a for a in q['answers'] if a != q['correct']]
             random.shuffle(wrong)
-            removed = wrong[:2]
-            await fetch_json(
-                f"{BACKEND_URL}/chat",
-                "POST",
-                {
-                    "player": "BOT",
-                    "message": (
-                        f"Podpowiedź 50/50 (koszt {cost} zł): "
-                        f"to na pewno NIE są: {removed[0]} i {removed[1]}."
-                    ),
-                },
-            )
-            set_phase_info(
-                f"Kupiono 50/50 za {cost} zł. Czas na odpowiedź wydłużony.",
-                color="blue",
-            )
-            page.update()
+            msg = f"To na pewno NIE jest: {wrong[0]} ani {wrong[1]}"
 
-    async def mp_poll_state():
-        while mp_state["player_id"]:
-            data = await fetch_json(f"{BACKEND_URL}/state", "GET")
-            if not data:
-                await asyncio.sleep(1.5)
-                continue
+        await send_bot_message(f"Podpowiedź {hint_type.upper()} (koszt {cost} zł): {msg}")
 
-            round_id = data.get("round_id")
-            phase = data.get("phase")
-            pot_backend = data.get("pot", 0)
-            time_left_backend = int(data.get("time_left", 0))
-            players_list = data.get("players", [])
-            chat_list = data.get("chat", [])
-            answering_player_id_backend = data.get("answering_player_id")
+    # ----------------- PĘTLA GRY (Heartbeat + State Polling) -----------------
 
-            mp_state["current_round_id"] = round_id
-            mp_state["backend_pot"] = pot_backend
-            refresh_pot_label()
+    async def detect_verdict_logic():
+        """Logika sprawdzania odpowiedzi - wykonuje ją ADMIN lokalnie."""
+        if not state.is_admin or not (0 <= state.current_q_index < len(state.questions)):
+            return
 
-            txt_timer.value = f"Czas (z backendu): {time_left_backend} s"
-            txt_timer.update()
+        q = state.questions[state.current_q_index]
+        user_ans = normalize_answer(state.current_answer_text)
+        correct_ans = normalize_answer(q["correct"])
+        ratio = fuzz.ratio(user_ans, correct_ans)
+        
+        win_amt = state.current_round_pot
+        winner = state.answering_player_name
 
-            my_id = mp_state["player_id"]
+        if ratio >= 80:
+            # Sukces - aktualizujemy kasę u zwycięzcy (lokalnie u admina, ale trzeba by to wysłać do backendu w idealnym świecie)
+            if winner == state.player_name:
+                state.local_money += win_amt
+                refresh_local_money()
+            
+            await send_bot_message(f"TAK! Odpowiedź prawidłowa ({ratio}%). {winner} zgarnia {win_amt} zł!")
+            state.carryover_pot = 0
+        else:
+            # Porażka
+            await send_bot_message(f"NIE! Prawidłowa to: {q['correct']}. Pula przechodzi dalej.")
+            state.carryover_pot = win_amt
 
-            render_chat(chat_list, players_list)
-            await process_chat_commands(chat_list, players_list)
+        # Przejście do następnego
+        next_idx = state.current_q_index + 1
+        if next_idx >= len(state.questions):
+            await send_bot_message("Koniec zestawu! Dzięki za grę.")
+            state.local_phase = "idle"
+            return
 
-            now = time.time()
+        state.current_q_index = next_idx
+        state.local_phase = "countdown"
+        state.countdown_until = time.time() + 20.0
+        state.current_answer_text = ""
+        state.verdict_sent = False
+        state.abcd_bought_this_round = False
+        state.hints_extra = 0
+        
+        txt_round_info.value = f"Pytanie {next_idx+1} / {len(state.questions)}"
+        txt_round_info.update()
+        await send_bot_message("Za 20 sekund start kolejnej licytacji!")
 
-            # wykrywanie zniknięcia
-            await detect_player_disconnect(players_list)
 
-            # --- logika faz lokalnych ---
-            if mp_state["local_phase"] == "countdown":
-                remain = int(mp_state["countdown_until"] - now)
-                if remain < 0:
-                    remain = 0
-                set_phase_info(
-                    f"Odliczanie do licytacji: {remain} s...",
-                    color="blue",
-                )
+    async def game_loop():
+        """Jedna główna pętla odświeżająca stan."""
+        while state.joined:
+            # 1. Pobranie stanu z serwera
+            data = await fetch_json(f"{BACKEND_URL}/state")
+            if data:
+                state.current_round_id = data.get("round_id")
+                backend_phase = data.get("phase")
+                state.backend_pot = data.get("pot", 0)
+                
+                # Synchronizacja czasu i graczy
+                txt_timer.value = f"Czas serwera: {int(data.get('time_left', 0))} s"
+                txt_timer.update()
+                
+                await render_chat(data.get("chat", []), data.get("players", []))
+                await process_chat_commands(data.get("chat", []), data.get("players", []))
+                refresh_pot_label()
 
-                if remain <= 0:
-                    mp_state["local_phase"] = "bidding"
-                    # ADMIN uruchamia następną rundę w backendzie i ogłasza start licytacji
-                    if mp_state["is_admin"]:
-                        _ = await fetch_json(
-                            f"{BACKEND_URL}/next_round",
-                            "POST",
-                            {},
-                        )
-                        await fetch_json(
-                            f"{BACKEND_URL}/chat",
-                            "POST",
-                            {
-                                "player": "BOT",
-                                "message": "START LICYTACJI – licytujcie o prawo do odpowiedzi!",
-                            },
-                        )
+                # Heartbeat admina
+                my_player_data = next((p for p in data.get("players", []) if p["id"] == state.player_id), None)
+                if my_player_data:
+                    state.is_admin = my_player_data.get("is_admin", False)
+                    # Ping (heartbeat)
+                    await fetch_json(f"{BACKEND_URL}/heartbeat", "POST", {"player_id": state.player_id})
 
-                # przyciski licytacji
-                btn_bid.disabled = phase != "bidding"
-                btn_all_in.disabled = phase != "bidding"
-                btn_finish_bidding.disabled = phase != "bidding"
-                btn_bid.update()
-                btn_all_in.update()
-                btn_finish_bidding.update()
+                # ---------------- LOGIKA FAZ ----------------
+                now = time.time()
 
-            elif mp_state["local_phase"] == "bidding":
-                # wpisowe 500 zł na rundę (raz na round_id)
-                if round_id is not None and mp_state["bidding_fee_paid_for_round"] != round_id:
-                    mp_state["local_money"] -= ENTRY_FEE
-                    mp_state["bidding_fee_paid_for_round"] = round_id
-                    refresh_local_money()
-                    await fetch_json(
-                        f"{BACKEND_URL}/chat",
-                        "POST",
-                        {
-                            "player": "BOT",
-                            "message": (
-                                f"Pobrano wpisowe {ENTRY_FEE} zł od gracza {mp_state['player_name']} "
-                                "za udział w tej rundzie."
-                            ),
-                        },
-                    )
+                # A. Odliczanie przed licytacją
+                if state.local_phase == "countdown":
+                    remain = int(state.countdown_until - now)
+                    set_phase_info(f"Licytacja za: {max(0, remain)} s", "blue")
+                    
+                    if remain <= 0:
+                        state.local_phase = "bidding"
+                        if state.is_admin:
+                            await fetch_json(f"{BACKEND_URL}/next_round", "POST", {})
+                            await send_bot_message("START LICYTACJI!")
 
-                btn_bid.disabled = phase != "bidding"
-                btn_all_in.disabled = phase != "bidding"
-                btn_finish_bidding.disabled = phase != "bidding"
-                btn_bid.update()
-                btn_all_in.update()
-                btn_finish_bidding.update()
+                # B. Licytacja
+                elif state.local_phase == "bidding":
+                    # Włącz przyciski
+                    is_bidding = (backend_phase == "bidding")
+                    btn_bid.disabled = not is_bidding
+                    btn_all_in.disabled = not is_bidding
+                    btn_finish_bidding.disabled = not is_bidding
+                    btn_bid.update()
+                    btn_all_in.update()
+                    btn_finish_bidding.update()
 
-                # Back-end przeszedł do fazy answering
-                if phase == "answering":
-                    mp_state["local_phase"] = "answering_wait"
-                    mp_state["answer_deadline"] = now + BASE_ANSWER_TIME
-                    mp_state["current_answer_text"] = ""
-                    mp_state["verdict_sent"] = False
-                    mp_state["answering_player_id"] = answering_player_id_backend
-                    mp_state["hints_extra"] = 0
-                    mp_state["abcd_bought_this_round"] = False
-                    refresh_pot_label()
+                    # Pobranie wpisowego
+                    if state.current_round_id and state.bidding_fee_paid_for_round != state.current_round_id:
+                        state.local_money -= ENTRY_FEE
+                        state.bidding_fee_paid_for_round = state.current_round_id
+                        refresh_local_money()
 
-                    winner_name = "?"
-                    for p in players_list:
-                        if p["id"] == answering_player_id_backend:
-                            winner_name = p["name"]
-                            break
-                    mp_state["answering_player_name"] = winner_name
+                    # Przejście serwera w fazę answering -> u nas answering_wait
+                    if backend_phase == "answering":
+                        state.local_phase = "answering_wait"
+                        state.answering_player_id = data.get("answering_player_id")
+                        state.answer_deadline = now + BASE_ANSWER_TIME
+                        
+                        # Znajdź nazwę zwycięzcy
+                        winner_name = next((p["name"] for p in data.get("players", []) if p["id"] == state.answering_player_id), "?")
+                        state.answering_player_name = winner_name
+                        
+                        # Wyświetl pytanie (robi to admin, żeby nie spamować)
+                        if state.is_admin and 0 <= state.current_q_index < len(state.questions):
+                            q_text = state.questions[state.current_q_index]["question"]
+                            await send_bot_message(f"Gracz {winner_name} wygrał! PYTANIE: {q_text}")
 
-                    q_idx = mp_state["current_q_index"]
-                    if mp_state["is_admin"] and 0 <= q_idx < len(mp_state["questions"]):
-                        q = mp_state["questions"][q_idx]
-                        question_text = q["question"]
+                        # Odblokuj podpowiedzi tylko dla wygranego
+                        im_winner = (state.player_id == state.answering_player_id)
+                        btn_hint_abcd.disabled = not im_winner
+                        btn_hint_5050.disabled = not im_winner
+                        btn_hint_abcd.update()
+                        btn_hint_5050.update()
 
-                        # Najpierw info o zwycięzcy
-                        await fetch_json(
-                            f"{BACKEND_URL}/chat",
-                            "POST",
-                            {
-                                "player": "BOT",
-                                "message": f"Gracz {winner_name} wygrał licytację!",
-                            },
-                        )
-                        # Następnie PYTANIE: cała linia ciemno-niebieska (styl po stronie klienta)
-                        await fetch_json(
-                            f"{BACKEND_URL}/chat",
-                            "POST",
-                            {
-                                "player": "BOT",
-                                "message": f"PYTANIE: {question_text}",
-                            },
-                        )
+                # C. Czekanie na odpowiedź (Answering Wait)
+                elif state.local_phase == "answering_wait":
+                    remain = int(state.answer_deadline - now)
+                    set_phase_info(f"Odpowiada {state.answering_player_name}: {max(0, remain)} s", "green")
+                    
+                    # Koniec czasu na odpowiedź
+                    if remain <= 0 and not state.current_answer_text:
+                        state.current_answer_text = "" # Brak odpowiedzi
+                        state.local_phase = "discussion"
+                        state.discussion_until = now + 20.0
+                        if state.is_admin:
+                            await send_bot_message("Czas minął! Brak odpowiedzi. Dyskusja 20s.")
 
-                    # Podpowiedzi tylko dla zwycięzcy
-                    is_me_winner = my_id == answering_player_id_backend
-                    btn_hint_abcd.disabled = not is_me_winner
-                    btn_hint_5050.disabled = not is_me_winner
-                    btn_hint_abcd.update()
-                    btn_hint_5050.update()
-
-                    set_phase_info(
-                        f"Na pytanie odpowiada: {mp_state['answering_player_name']} (ma 60 s).",
-                        color="green",
-                    )
-
-            elif mp_state["local_phase"] == "answering_wait":
-                remain = int(mp_state["answer_deadline"] - now)
-                if remain < 0:
-                    remain = 0
-                set_phase_info(
-                    f"Na pytanie odpowiada {mp_state['answering_player_name']} – pozostało {remain} s.",
-                    color="green",
-                )
-
-                if remain <= 0 and not mp_state["current_answer_text"]:
-                    mp_state["current_answer_text"] = ""
-                    mp_state["local_phase"] = "discussion"
-                    mp_state["discussion_until"] = now + 20.0
-                    mp_state["verdict_sent"] = False
-
-                    if mp_state["is_admin"]:
-                        await fetch_json(
-                            f"{BACKEND_URL}/chat",
-                            "POST",
-                            {
-                                "player": "BOT",
-                                "message": (
-                                    "Czas na odpowiedź minął. "
-                                    "A wy jak myślicie mistrzowie, czy brak odpowiedzi "
-                                    "to poprawna odpowiedź? Macie 20 sekund na komentarze!"
-                                ),
-                            },
-                        )
-
-            elif mp_state["local_phase"] == "discussion":
-                remain = int(mp_state["discussion_until"] - now)
-                if remain < 0:
-                    remain = 0
-                set_phase_info(
-                    f"Dyskusja – pozostało {remain} s na komentarze.",
-                    color="blue",
-                )
-
-                if remain <= 0 and not mp_state["verdict_sent"]:
-                    if mp_state["is_admin"]:
-                        await send_verdict_and_prepare_next_round()
-                    mp_state["verdict_sent"] = True
-                    mp_state["local_phase"] = "verdict"
-
-            elif mp_state["local_phase"] == "verdict":
-                # czekamy na kolejne odliczanie / zakończenie gry
-                pass
+                # D. Dyskusja
+                elif state.local_phase == "discussion":
+                    remain = int(state.discussion_until - now)
+                    set_phase_info(f"Dyskusja: {max(0, remain)} s", "orange")
+                    
+                    if remain <= 0 and not state.verdict_sent:
+                        state.verdict_sent = True
+                        state.local_phase = "verdict"
+                        if state.is_admin:
+                            await detect_verdict_logic()
 
             await asyncio.sleep(1.0)
 
-    async def send_verdict_and_prepare_next_round():
-        q_idx = mp_state["current_q_index"]
-        if not (0 <= q_idx < len(mp_state["questions"])):
-            return
+    # ----------------- PODPIĘCIE ZDARZEŃ -----------------
 
-        # Upewniamy się, że pula jest aktualna
-        refresh_pot_label()
-        q = mp_state["questions"][q_idx]
-        correct = q["correct"]
-        user_answer = mp_state["current_answer_text"]
-        norm_user = normalize_answer(user_answer)
-        norm_correct = normalize_answer(correct)
-        similarity = fuzz.ratio(norm_user, norm_correct)
-        winner_name = mp_state["answering_player_name"]
-        pot_ui = mp_state["current_round_pot"]
+    # W Flet można podpinać funkcje async bezpośrednio
+    btn_join.on_click = on_join
+    txt_name.on_submit = on_join
+    
+    txt_chat_input.on_submit = on_send_chat
+    btn_chat_send.on_click = on_send_chat
+    
+    btn_bid.on_click = lambda e: page.run_task(on_bid, "normal")
+    btn_all_in.on_click = lambda e: page.run_task(on_bid, "allin")
+    btn_finish_bidding.on_click = lambda e: page.run_task(on_finish_bidding)
+    
+    btn_hint_abcd.on_click = lambda e: page.run_task(on_buy_hint, "abcd")
+    btn_hint_5050.on_click = lambda e: page.run_task(on_buy_hint, "5050")
 
-        if similarity >= 80:
-            # DOBRA ODPOWIEDŹ
-            if winner_name == mp_state["player_name"]:
-                mp_state["local_money"] += pot_ui
-                refresh_local_money()
-
-            await fetch_json(
-                f"{BACKEND_URL}/chat",
-                "POST",
-                {
-                    "player": "BOT",
-                    "message": (
-                        f"TAK, odpowiedź prawidłowa! ({similarity}%) "
-                        f"Gracz {winner_name} wygrywa {pot_ui} zł z puli!"
-                    ),
-                },
-            )
-            mp_state["carryover_pot"] = 0
-        else:
-            # ZŁA ODPOWIEDŹ
-            await fetch_json(
-                f"{BACKEND_URL}/chat",
-                "POST",
-                {
-                    "player": "BOT",
-                    "message": (
-                        f"NIE, odpowiedź błędna ({similarity}%). "
-                        f"Prawidłowa odpowiedź: {correct}. "
-                        f"Pula {pot_ui} zł przechodzi do następnego pytania!"
-                    ),
-                },
-            )
-            mp_state["carryover_pot"] = pot_ui
-
-        # Resetujemy zmienne rundy
-        mp_state["current_round_pot"] = 0
-        mp_state["backend_pot"] = 0
-        mp_state["hints_extra"] = 0
-        mp_state["abcd_bought_this_round"] = False
-        mp_state["bidding_fee_paid_for_round"] = None
-        refresh_pot_label()
-
-        next_idx = q_idx + 1
-        if next_idx >= len(mp_state["questions"]):
-            await fetch_json(
-                f"{BACKEND_URL}/chat",
-                "POST",
-                {
-                    "player": "BOT",
-                    "message": (
-                        "To było ostatnie pytanie z tego zestawu. "
-                        "Koniec gry! Dzięki za udział."
-                    ),
-                },
-            )
-            set_phase_info("Koniec zestawu pytań.", color="red")
-            return
-
-        mp_state["current_q_index"] = next_idx
-        mp_state["local_phase"] = "countdown"
-        mp_state["countdown_until"] = time.time() + 20.0
-        mp_state["answering_player_id"] = None
-        mp_state["answering_player_name"] = ""
-        mp_state["current_answer_text"] = ""
-        mp_state["verdict_sent"] = False
-
-        txt_round_info.value = (
-            f"Pytanie {next_idx + 1} / {len(mp_state['questions'])} "
-            f"(Zestaw {mp_state['set_name']})"
-        )
-        txt_round_info.update()
-
-        await fetch_json(
-            f"{BACKEND_URL}/chat",
-            "POST",
-            {
-                "player": "BOT",
-                "message": (
-                    "Za 20 sekund start kolejnej rundy i nowej licytacji!"
-                ),
-            },
-        )
-        set_phase_info(
-            "Odliczanie do kolejnej licytacji...",
-            color="blue",
-        )
-
-        btn_hint_abcd.disabled = True
-        btn_hint_5050.disabled = True
-        btn_hint_abcd.update()
-        btn_hint_5050.update()
-
-    # --- PODPIĘCIE HANDLERÓW ---
-
-    btn_join.on_click = make_async_click(mp_register)
-    btn_chat_send.on_click = make_async_click(mp_send_chat)
-    btn_bid.on_click = make_async_click(mp_bid_normal)
-    btn_all_in.on_click = make_async_click(mp_bid_allin)
-    btn_finish_bidding.on_click = make_async_click(mp_finish_bidding)
-    btn_hint_abcd.on_click = make_async_click(buy_hint_abcd)
-    btn_hint_5050.on_click = make_async_click(buy_hint_5050)
     page.update()
 
-
 if __name__ == "__main__":
-    try:
-        ft.app(target=main)
-    finally:
-        try:
-            loop = asyncio.get_event_loop()
-            loop.close()
-        except Exception:
-            pass
+    ft.app(target=main)
