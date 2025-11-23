@@ -1,9 +1,11 @@
 import flet as ft
+import flet_audio  # <--- NOWY IMPORT (wymaga: pip install flet-audio)
 import asyncio
 import json
 import re
 from dataclasses import dataclass
 
+# Obsługa Pyodide (przeglądarka)
 try:
     import js
     from js import fetch
@@ -27,12 +29,12 @@ class GameState:
     
     # Do obsługi dźwięków i czatu
     last_chat_ts: float = 0.0
-    last_audio_ts: float = 0.0  # Osobny timestamp dla dźwięków
-    timer_alert_played: bool = False # Żeby dźwięk 5s zagrał tylko raz na fazę
+    last_audio_ts: float = 0.0
+    timer_alert_played: bool = False
     
     server_abcd_bought: bool = False
 
-# Paleta kolorów dla graczy (wizualna)
+# Paleta kolorów dla graczy
 PLAYER_COLORS = [
     "#2E7D32", "#C62828", "#AD1457", "#6A1B9A", 
     "#283593", "#0277BD", "#00695C", "#558B2F", 
@@ -43,7 +45,6 @@ PLAYER_COLORS = [
 def get_player_color(name: str) -> str:
     return PLAYER_COLORS[abs(hash(name)) % len(PLAYER_COLORS)]
 
-# Mapowanie gracza na plik dźwiękowy (player01 - player06)
 def get_player_sound_file(name: str) -> str:
     # Zwraca "player01.wav" do "player06.wav"
     idx = (abs(hash(name)) % 6) + 1
@@ -68,24 +69,24 @@ async def main(page: ft.Page):
     page.theme_mode = ft.ThemeMode.LIGHT
     state = GameState()
 
-    # --- AUDIO SYSTEM ---
-    # Tworzymy obiekty Audio dla każdego pliku
+    # --- AUDIO SYSTEM (Zaktualizowany do flet-audio) ---
     sounds = {}
     
     def play_sound(key: str):
         if key in sounds:
-            # Resetujemy i gramy
             try:
+                # flet-audio ma identyczne metody jak stare ft.Audio
                 sounds[key].seek(0)
                 sounds[key].play()
             except Exception:
-                pass # Ignoruj błędy audio w przeglądarce
+                pass 
 
-    # Dodajemy audio do overlay
+    # Dodajemy audio do overlay używając flet_audio.Audio
     # 1. Gracze
     for i in range(1, 7):
         fname = f"player0{i}.wav"
-        snd = ft.Audio(src=f"/{fname}", autoplay=False)
+        # ZMIANA: Używamy flet_audio.Audio zamiast ft.Audio
+        snd = flet_audio.Audio(src=f"/{fname}", autoplay=False)
         page.overlay.append(snd)
         sounds[fname] = snd
     
@@ -98,7 +99,8 @@ async def main(page: ft.Page):
         "out_of_time": "out_of_time.wav"
     }
     for k, v in sys_files.items():
-        snd = ft.Audio(src=f"/{v}", autoplay=False)
+        # ZMIANA: Używamy flet_audio.Audio zamiast ft.Audio
+        snd = flet_audio.Audio(src=f"/{v}", autoplay=False)
         page.overlay.append(snd)
         sounds[k] = snd
 
@@ -138,16 +140,12 @@ async def main(page: ft.Page):
     
     page.add(layout)
 
-    # --- LOGIKA DŹWIĘKÓW CZATU ---
+    # --- LOGIKA DŹWIĘKÓW ---
 
     def process_chat_sounds(chat_list):
-        # Analizujemy tylko nowe wiadomości
         new_msgs = [m for m in chat_list if m.get("timestamp", 0) > state.last_audio_ts]
-        
-        if not new_msgs:
-            return
+        if not new_msgs: return
 
-        # Aktualizujemy timestamp na ostatnią
         state.last_audio_ts = new_msgs[-1].get("timestamp", 0)
 
         for msg in new_msgs:
@@ -155,35 +153,21 @@ async def main(page: ft.Page):
             text = msg.get("message", "")
 
             if p_name == "BOT":
-                # Analiza treści BOTA
-                if "PYTANIE:" in text:
-                    play_sound("question")
-                elif "ABCD" in text and "Podpowiedź" in text:
-                    play_sound("abcd")
-                elif "50/50" in text and "Podpowiedź" in text:
-                    play_sound("5050")
+                if "PYTANIE:" in text: play_sound("question")
+                elif "ABCD" in text and "Podpowiedź" in text: play_sound("abcd")
+                elif "50/50" in text and "Podpowiedź" in text: play_sound("5050")
                 else:
-                    # Sprawdź czy to licytacja gracza (Bot pisze: "Gracz X podbija...")
-                    # Backend wysyła: "{p.name} podbija o..." lub "{p.name} VA BANQUE!"
-                    # Musimy wykryć, czy wiadomość zaczyna się od nazwy gracza i dotyczy licytacji
-                    # Prosty heurystyk:
                     if "podbija o" in text or "VA BANQUE" in text or "Licytację wygrywa" in text:
-                        # Próbujemy wyciągnąć imię gracza. Zazwyczaj jest na początku.
-                        # Np. "Marek podbija o 100." -> Marek
                         possible_name = text.split(" ")[0]
-                        # Gramy dźwięk tego gracza
                         play_sound(get_player_sound_file(possible_name))
                     else:
-                        # Inny komunikat bota
                         play_sound("bot")
             else:
-                # Zwykła wiadomość gracza (nie Bot)
                 play_sound(get_player_sound_file(p_name))
 
     async def render_chat(chat_list, players_list):
         if not chat_list: return
         
-        # Renderowanie tekstu (tylko jeśli coś nowego)
         last_ts = chat_list[-1].get("timestamp", 0)
         if last_ts != state.last_chat_ts:
             state.last_chat_ts = last_ts
@@ -214,12 +198,10 @@ async def main(page: ft.Page):
                 chat_col.controls.append(ft.Text(spans=spans, selectable=True, size=12))
             chat_col.update()
         
-        # Dźwięki (zawsze wywołujemy, funkcja sama sprawdza czy są nowe)
         process_chat_sounds(chat_list)
 
     async def game_loop():
         current_local_phase = "idle"
-        
         while state.joined:
             try:
                 data = await fetch_json(f"{BACKEND_URL}/state")
@@ -229,19 +211,15 @@ async def main(page: ft.Page):
                     pot_val = data.get("pot", 0)
                     phase = data.get("phase")
                     
-                    # --- LOGIKA TIMERA (DŹWIĘK 5s) ---
-                    # Jeśli faza się zmieniła, resetujemy flagę dźwięku
+                    # Timer alert (5s)
                     if phase != current_local_phase:
                         state.timer_alert_played = False
                         current_local_phase = phase
                     
-                    # Jeśli czas < 5.5s (żeby złapać moment) i > 0 i jeszcze nie zagraliśmy
-                    # Dotyczy licytacji, odpowiadania i dyskusji
                     if 0 < time_left <= 5.5 and not state.timer_alert_played:
                         if phase in ["bidding", "answering", "discussion"]:
                             play_sound("out_of_time")
                             state.timer_alert_played = True
-                    # ----------------------------------
 
                     state.local_phase = phase
                     state.answering_player_id = data.get("answering_player_id")
@@ -255,6 +233,7 @@ async def main(page: ft.Page):
                         txt_pot.value = f"Pula: {pot_val} zł"
                         await fetch_json(f"{BACKEND_URL}/heartbeat", "POST", {"player_id": state.player_id})
 
+                    # Przyciski
                     is_my_turn_ans = (phase == "answering" and state.answering_player_id == state.player_id)
                     is_bidding = (phase == "bidding")
                     
@@ -283,10 +262,6 @@ async def main(page: ft.Page):
             row_login.visible = False
             input_chat.disabled = False
             btn_send.disabled = False
-            
-            # WAŻNE: Przeglądarki blokują auto-play audio dopóki użytkownik nie wejdzie w interakcję.
-            # Kliknięcie "Dołącz" jest tą interakcją, więc odblokowuje dźwięki.
-            
             page.run_task(game_loop)
             page.update()
 
